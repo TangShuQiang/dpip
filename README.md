@@ -91,3 +91,94 @@ shell> sudo ./usertools/dpdk-devbind.py --status
 
 shell> sudo ip link set eth0 up
 ```
+## 2. 协议的结构体信息
+```C++
+/*
+    +------------+---------------+------------------+--------------+
+    |   ethhdr   |     iphdr     |   udphdr/tcphdr  |   payload    |
+    +------------+---------------+------------------+--------------+
+
+    +------------+---------------+
+    |   ethhdr   |     arphdr    |
+    +------------+---------------+
+
+    +------------+---------------+---------+
+    |   ethhdr   |     iphdr     |   icmp  |   (ICMP属于IP协议，在网络层)
+    +------------+---------------+---------+
+*/
+
+/*
+  以太网头部:
+        struct rte_ether_hdr {
+            struct rte_ether_addr d_addr; // 目的MAC地址
+            struct rte_ether_addr s_addr; // 源MAC地址
+            uint16_t ether_type; // 以太网类型
+        };
+        struct rte_ether_addr {
+            uint8_t addr_bytes[RTE_ETHER_ADDR_LEN]; // MAC地址
+        };
+*/
+
+/*
+  IP头部：
+        struct rte_ipv4_hdr {
+            uint8_t version_ihl;                // 版本和头部长度
+            uint8_t type_of_service;            // 服务类型
+            uint16_t total_length;              // 总长度(包括IP头部和数据)
+            uint16_t packet_id;                 // 数据包ID
+            uint16_t fragment_offset;           // 分片偏移
+            uint8_t time_to_live;               // 生存时间
+            uint8_t next_proto_id;              // 协议类型
+            uint16_t hdr_checksum;              // 头部校验和
+            uint32_t src_addr;                  // 源IP地址
+            uint32_t dst_addr;                  // 目的IP地址
+        };
+*/
+
+/*
+  ICMP头部：
+        struct rte_icmp_hdr {
+            uint8_t icmp_type; // ICMP类型
+            uint8_t icmp_code; // ICMP代码
+            uint16_t icmp_cksum; // ICMP校验和
+            uint32_t icmp_ident; // ICMP标识符
+            uint32_t icmp_seq_nb; // ICMP序列号
+        };
+*/
+
+/*
+  ARP头部：
+        struct rte_arp_hdr
+        {
+            uint16_t arp_hardware;          // 硬件地址格式
+            uint16_t arp_protocol;          // 协议地址格式
+            uint8_t  arp_hlen;              // 硬件地址长度
+            uint8_t  arp_plen;              // 协议地址长度
+            uint16_t arp_opcode;            // ARP操作码
+            struct rte_arp_ipv4 arp_data;
+        };
+
+        struct rte_arp_ipv4 arp_data
+        {
+            struct rte_ether_addr arp_sha; // 发送方硬件地址
+            uint32_t          arp_sip;     // 发送方IP地址
+            struct rte_ether_addr arp_tha; // 目标硬件地址
+            uint32_t          arp_tip;     // 目标IP地址
+        };
+
+    ARP请求时：
+    以太网头部目的MAC地址为广播地址：FF:FF:FF:FF:FF:FF
+    ARP头部目的MAC地址为零MAC地址：00:00:00:00:00:00
+*/
+
+/*
+    UDP头部：
+        struct rte_udp_hdr {
+            uint16_t src_port; // 源端口
+            uint16_t dst_port; // 目的端口
+            uint16_t dgram_len; // 数据报长度(包括UDP头部)
+            uint16_t dgram_cksum; // 数据报校验和
+        };
+*/
+
+```

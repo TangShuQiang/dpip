@@ -1,4 +1,4 @@
-#include "logger.h"
+#include "dpip_logger.h"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -16,7 +16,7 @@ void log_message(const char *color, const char *level, const char *file, const c
 
     va_list args_copy;
     va_copy(args_copy, args);  // 复制 va_list，避免参数解析错误
-
+    
     // 输出到 stderr
     if (LOG_TO_CONSOLE) {
         fprintf(stderr, "%s[%s] %s:%s:%d ", color, level, file, func, line);
@@ -26,7 +26,7 @@ void log_message(const char *color, const char *level, const char *file, const c
 
     // 输出到日志文件
     if (LOG_TO_FILE) {
-        FILE *log_file = fopen(LOG_FILE_PATH, "a");
+        FILE *log_file = fopen(LOG_FILE_PATH, "a"); 
         if (log_file) {
             fprintf(log_file, "[%s] %s:%s:%d ", level, file, func, line);
             vfprintf(log_file, fmt, args_copy);

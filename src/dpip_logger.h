@@ -1,5 +1,5 @@
-#ifndef __DPP_LOGGER_H__
-#define __DPP_LOGGER_H__
+#ifndef __DPIP_LOGGER_H__
+#define __DPIP_LOGGER_H__
 
 #define COLOR_DEBUG  "\033[0m"    // 默认颜色
 #define COLOR_WARN   "\033[33m"   // 黄色
@@ -9,7 +9,7 @@
 // 日志输出控制
 #define LOG_TO_CONSOLE      1       // 1 = 允许输出到 stderr，0 = 关闭
 #define LOG_TO_FILE         1       // 1 = 允许输出到日志文件，0 = 关闭
-#define LOG_FILE_PATH       "logs/log.txt"
+#define LOG_FILE_PATH       "log.txt"
 
 // 日志级别控制
 #define LOG_LEVEL_DEBUG     1       // 1 = 启用 debug 日志, 0 = 禁用
