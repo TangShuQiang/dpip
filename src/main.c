@@ -1,10 +1,12 @@
 #include "dpip_logger.h"
 #include "dpip_pkt.h"
+#include "dpip_arptable.h"
 
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_ring.h>
+#include <rte_timer.h>
 
 #include <arpa/inet.h>
 
@@ -12,6 +14,9 @@
 #define BURST_SIZE 32                       // 数据包接收数量
 #define RING_SIZE 1024                      // 环形队列大小
 #define MAKE_IPV4_ADDR(a, b, c, d) (a + (b << 8) + (c << 16) + (d << 24))   // IPV4地址构造
+
+// 2000000000 = 1s
+#define TIMER_RESOLUTION_CYCLES 2000000000ULL * 60 * 5     // 5min
 
 int gDpdkPortId = 0;                        // 网卡端口ID
 
@@ -30,6 +35,88 @@ uint32_t gBroadcaseIp = MAKE_IPV4_ADDR(114, 213, 212, 255);                     
 const struct rte_eth_conf port_conf_default = {
     .rxmode = {.max_rx_pkt_len = RTE_ETHER_MAX_LEN}
 };
+
+// 处理ICMP数据包
+static void pkt_process_icmp(struct rte_mempool* mbuf_pool, uint8_t* pkt_ptr) {
+    struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
+    struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
+    struct rte_icmp_hdr* icmp_hdr = (struct rte_icmp_hdr*)(ip_hdr + 1);
+
+    // 判断是否为ICMP回显请求
+    if (icmp_hdr->icmp_type == RTE_IP_ICMP_ECHO_REQUEST) {
+
+        char src_ip[INET_ADDRSTRLEN];
+        char dst_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &ip_hdr->src_addr, src_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &ip_hdr->dst_addr, dst_ip, INET_ADDRSTRLEN);
+        LOGGER_DEBUG("<=========recv ICMP========>src: %s, dst: %s", src_ip, dst_ip);
+
+        struct rte_mbuf* icmp_buf = get_icmp_pkt(mbuf_pool
+                                                , eth_hdr->s_addr.addr_bytes
+                                                , gSrcMac
+                                                , ip_hdr->src_addr
+                                                , gLocalIp
+                                                , icmp_hdr->icmp_ident
+                                                , icmp_hdr->icmp_seq_nb);
+        if (icmp_buf) {
+            rte_ring_mp_enqueue(gOutPktRing, icmp_buf);
+        }
+    }
+}
+
+// 处理IPV4数据包
+static void pkt_process_ipv4(struct rte_mempool* mbuf_pool, uint8_t* pkt_ptr) {
+    struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
+    struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
+
+    // 判断目的IP地址是否是广播地址或者本地IP地址
+    if (ip_hdr->dst_addr == gBroadcaseIp || ip_hdr->dst_addr == gLocalIp) {
+
+        switch (ip_hdr->next_proto_id) {
+            // 判断是否为ICMP数据包
+            case IPPROTO_ICMP: {
+                pkt_process_icmp(mbuf_pool, pkt_ptr);
+                break;
+            }// ICMP数据包
+
+            default:
+                break;
+        }
+
+    }
+}
+
+// 处理ARP数据包
+static void pkt_process_arp(struct rte_mempool* mbuf_pool, uint8_t* pkt_ptr) {
+    struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
+    struct rte_arp_hdr* arp_hdr = (struct rte_arp_hdr*)(eth_hdr + 1);
+
+    // 判断ARP的目的IP地址是否是本地IP地址
+    if (arp_hdr->arp_data.arp_tip == gLocalIp) {
+
+        char src_ip[INET_ADDRSTRLEN];
+        char dst_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &arp_hdr->arp_data.arp_sip, src_ip, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &arp_hdr->arp_data.arp_tip, dst_ip, INET_ADDRSTRLEN);
+        LOGGER_DEBUG("<=========recv ARP========>src: %s, dst: %s, arp_opcode: %d", src_ip, dst_ip, rte_be_to_cpu_16(arp_hdr->arp_opcode));
+
+        if (rte_be_to_cpu_16(arp_hdr->arp_opcode) == RTE_ARP_OP_REQUEST) {
+
+            struct rte_mbuf* arp_buf = get_arp_pkt(mbuf_pool
+                                                , RTE_ARP_OP_REPLY
+                                                , arp_hdr->arp_data.arp_sha.addr_bytes
+                                                , gSrcMac
+                                                , arp_hdr->arp_data.arp_sip
+                                                , gLocalIp);
+            if (arp_buf) {
+                rte_ring_mp_enqueue(gOutPktRing, arp_buf);
+            }
+        } else if (rte_be_to_cpu_16(arp_hdr->arp_opcode) == RTE_ARP_OP_REPLY) {
+            update_arp_entry(arp_hdr->arp_data.arp_sip, arp_hdr->arp_data.arp_sha.addr_bytes);
+        }
+        // dump_arp_table();
+    }
+}
 
 // 数据包处理函数
 static int pkt_process(void* arg) {
@@ -50,71 +137,13 @@ static int pkt_process(void* arg) {
                 switch (rte_be_to_cpu_16(eth_hdr->ether_type)) {
                     // 判断是否为IPV4数据包
                     case RTE_ETHER_TYPE_IPV4: {
-                        struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
-
-                        // 判断目的IP地址是否是广播地址或者本地IP地址
-                        if (ip_hdr->dst_addr == gBroadcaseIp || ip_hdr->dst_addr == gLocalIp) {
-
-                            switch (ip_hdr->next_proto_id) {
-                                // 判断是否为ICMP数据包
-                                case IPPROTO_ICMP: {
-                                    struct rte_icmp_hdr* icmp_hdr = (struct rte_icmp_hdr*)(ip_hdr + 1);
-
-                                    // 判断是否为ICMP回显请求
-                                    if (icmp_hdr->icmp_type == RTE_IP_ICMP_ECHO_REQUEST) {
-
-                                        struct in_addr src_addr, dst_addr;
-                                        src_addr.s_addr = ip_hdr->src_addr;
-                                        dst_addr.s_addr = ip_hdr->dst_addr;
-                                        LOGGER_DEBUG("<=========recv ICMP========>src: %s, dst: %s", inet_ntoa(src_addr), inet_ntoa(dst_addr));
-
-                                        struct rte_mbuf* icmp_buf = get_icmp_pkt(mbuf_pool
-                                                                                , eth_hdr->s_addr.addr_bytes
-                                                                                , gSrcMac
-                                                                                , ip_hdr->src_addr
-                                                                                , gLocalIp
-                                                                                , icmp_hdr->icmp_ident
-                                                                                , icmp_hdr->icmp_seq_nb);
-                                        if (icmp_buf) {
-                                            rte_ring_mp_enqueue(gOutPktRing, icmp_buf);
-                                        }
-                                    }
-                                    break;
-                                }// ICMP数据包
-
-                                default:
-                                    break;
-                            }
-
-                        }
+                        pkt_process_ipv4(mbuf_pool, (uint8_t*)eth_hdr);
                         break;
                     }// IPV4数据包
 
                     // 判断是否为ARP数据包
                     case RTE_ETHER_TYPE_ARP: {
-                        struct rte_arp_hdr* arp_hdr = (struct rte_arp_hdr*)(eth_hdr + 1);
-
-                        // 判断ARP的目的IP地址是否是本地IP地址
-                        if (arp_hdr->arp_data.arp_tip == gLocalIp) {
-
-                            struct in_addr src_addr, dst_addr;
-                            src_addr.s_addr = arp_hdr->arp_data.arp_sip;
-                            dst_addr.s_addr = arp_hdr->arp_data.arp_tip;
-                            LOGGER_DEBUG("<=========recv ARP========>src: %s, dst: %s, arp_opcode=%d", inet_ntoa(src_addr), inet_ntoa(dst_addr), rte_be_to_cpu_16(arp_hdr->arp_opcode));
-                            
-                            if (rte_be_to_cpu_16(arp_hdr->arp_opcode) == RTE_ARP_OP_REQUEST) {
-
-                                struct rte_mbuf* arp_buf = get_arp_pkt(mbuf_pool
-                                                                    , RTE_ARP_OP_REPLY
-                                                                    , arp_hdr->arp_data.arp_sha.addr_bytes
-                                                                    , gSrcMac
-                                                                    , arp_hdr->arp_data.arp_sip
-                                                                    , gLocalIp);
-                                if (arp_buf) {
-                                    rte_ring_mp_enqueue(gOutPktRing, arp_buf);
-                                }
-                            }
-                        }
+                        pkt_process_arp(mbuf_pool, (uint8_t*)eth_hdr);
                         break;
                     }  // ARP数据包
 
@@ -127,6 +156,17 @@ static int pkt_process(void* arg) {
         } // for
     } // while
     return 0;
+}
+
+// ARP请求定时器回调函数
+static void arp_request_timer_cb(__attribute__((unused)) struct rte_timer* tim, void* arg) {
+    struct rte_mempool* mbuf_pool = (struct rte_mempool*)arg;
+
+    for (int i = 1; i < 254; ++i) {
+        uint32_t tip = (gLocalIp & 0x00FFFFFF) | (i << 24);
+        struct rte_mbuf* arp_pkt = get_arp_pkt(mbuf_pool, RTE_ARP_OP_REQUEST, gBroadcastMac, gSrcMac, tip, gLocalIp);
+        rte_ring_mp_enqueue(gOutPktRing, arp_pkt);
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -222,7 +262,15 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    unsigned lcord_id = rte_lcore_id();
+    rte_timer_subsystem_init();         // 初始化定时器子系统   
+    struct rte_timer timer;             // 定时器
+    rte_timer_init(&timer);             // 初始化定时器
+    uint64_t hz = rte_get_timer_hz();   // 获取默认计时器一秒钟的循环数
+    unsigned lcord_id = rte_lcore_id(); // 获取执行单元的应用程序线程 ID
+    rte_timer_reset(&timer, hz, PERIODICAL, lcord_id, arp_request_timer_cb, mbuf_pool); // 重置定时器
+    uint64_t prev_tsc = 0;              // 前一个时间戳
+    uint64_t cur_tsc;                   // 当前时间戳
+    uint64_t diff_tsc;                  // 时间戳差值
 
     lcord_id = rte_get_next_lcore(lcord_id, 1, 1);
 
@@ -254,6 +302,14 @@ int main(int argc, char* argv[]) {
             for (unsigned i = 0; i < tx_num; ++i) {
                 rte_pktmbuf_free(tx_mbufs[i]);
             }
+        }
+
+        cur_tsc = rte_rdtsc();          // 获取当前时间戳
+        diff_tsc = cur_tsc - prev_tsc;
+        if (diff_tsc > TIMER_RESOLUTION_CYCLES) {
+            LOGGER_DEBUG("rte_timer_manage");
+            rte_timer_manage();         // 处理定时器任务
+            prev_tsc = cur_tsc;
         }
     }
 

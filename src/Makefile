@@ -4,7 +4,7 @@
 # binary name
 APP = main
 
-SRCS:= ./dpip_logger.c ./dpip_pkt.c
+SRCS:= ./dpip_logger.c ./dpip_pkt.c ./dpip_arptable.c
 
 # all source are stored in SRCS-y
 SRCS-y:= main.c
