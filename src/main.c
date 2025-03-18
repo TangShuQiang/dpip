@@ -63,24 +63,22 @@ static int pkt_process(void* arg) {
                                     // 判断是否为ICMP回显请求
                                     if (icmp_hdr->icmp_type == RTE_IP_ICMP_ECHO_REQUEST) {
 
-                                        struct in_addr addr;
-                                        addr.s_addr = ip_hdr->src_addr;
-                                        LOGGER_DEBUG("<=========recv ICMP========>src: %s, ", inet_ntoa(addr));
-
-                                        addr.s_addr = ip_hdr->dst_addr;
-                                        LOGGER_DEBUG("dst: %s", inet_ntoa(addr));
+                                        struct in_addr src_addr, dst_addr;
+                                        src_addr.s_addr = ip_hdr->src_addr;
+                                        dst_addr.s_addr = ip_hdr->dst_addr;
+                                        LOGGER_DEBUG("<=========recv ICMP========>src: %s, dst: %s", inet_ntoa(src_addr), inet_ntoa(dst_addr));
 
                                         struct rte_mbuf* icmp_buf = get_icmp_pkt(mbuf_pool
                                                                                 , eth_hdr->s_addr.addr_bytes
                                                                                 , gSrcMac
                                                                                 , ip_hdr->src_addr
-                                                                                , ip_hdr->dst_addr
+                                                                                , gLocalIp
                                                                                 , icmp_hdr->icmp_ident
                                                                                 , icmp_hdr->icmp_seq_nb);
-                                        rte_ring_mp_enqueue(gOutPktRing, icmp_buf);
+                                        if (icmp_buf) {
+                                            rte_ring_mp_enqueue(gOutPktRing, icmp_buf);
+                                        }
                                     }
-
-
                                     break;
                                 }// ICMP数据包
 
@@ -91,6 +89,34 @@ static int pkt_process(void* arg) {
                         }
                         break;
                     }// IPV4数据包
+
+                    // 判断是否为ARP数据包
+                    case RTE_ETHER_TYPE_ARP: {
+                        struct rte_arp_hdr* arp_hdr = (struct rte_arp_hdr*)(eth_hdr + 1);
+
+                        // 判断ARP的目的IP地址是否是本地IP地址
+                        if (arp_hdr->arp_data.arp_tip == gLocalIp) {
+
+                            struct in_addr src_addr, dst_addr;
+                            src_addr.s_addr = arp_hdr->arp_data.arp_sip;
+                            dst_addr.s_addr = arp_hdr->arp_data.arp_tip;
+                            LOGGER_DEBUG("<=========recv ARP========>src: %s, dst: %s, arp_opcode=%d", inet_ntoa(src_addr), inet_ntoa(dst_addr), rte_be_to_cpu_16(arp_hdr->arp_opcode));
+                            
+                            if (rte_be_to_cpu_16(arp_hdr->arp_opcode) == RTE_ARP_OP_REQUEST) {
+
+                                struct rte_mbuf* arp_buf = get_arp_pkt(mbuf_pool
+                                                                    , RTE_ARP_OP_REPLY
+                                                                    , arp_hdr->arp_data.arp_sha.addr_bytes
+                                                                    , gSrcMac
+                                                                    , arp_hdr->arp_data.arp_sip
+                                                                    , gLocalIp);
+                                if (arp_buf) {
+                                    rte_ring_mp_enqueue(gOutPktRing, arp_buf);
+                                }
+                            }
+                        }
+                        break;
+                    }  // ARP数据包
 
                     default:
                         break;
