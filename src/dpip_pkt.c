@@ -4,6 +4,7 @@
 #include <rte_ip.h>
 #include <rte_icmp.h>
 #include <rte_arp.h>
+#include <rte_udp.h>
 
 void encode_ether_hdr(uint8_t* pkt_ptr
                     , uint8_t* dst_mac
@@ -74,6 +75,25 @@ void encode_arp_hdr(uint8_t* pkt_ptr
     arp_hdr->arp_data.arp_tip = tip;
 }
 
+void encode_udp_hdr(uint8_t* pkt_ptr
+                    , uint16_t src_port
+                    , uint16_t dst_port
+                    , uint8_t* data
+                    , uint16_t length) {
+    
+    struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)pkt_ptr;
+    struct rte_udp_hdr* udp_hdr = (struct rte_udp_hdr*)(ip_hdr + 1);
+
+    udp_hdr->src_port = src_port;
+    udp_hdr->dst_port = dst_port;
+    udp_hdr->dgram_len = rte_cpu_to_be_16(length + sizeof(struct rte_udp_hdr));
+    
+    rte_memcpy(udp_hdr + 1, data, length);
+
+    udp_hdr->dgram_cksum = 0;
+    udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr, udp_hdr);
+}
+
 struct rte_mbuf* get_icmp_pkt(struct rte_mempool* mbuf_pool
                             , uint8_t* dst_mac
                             , uint8_t* src_mac
@@ -93,8 +113,10 @@ struct rte_mbuf* get_icmp_pkt(struct rte_mempool* mbuf_pool
 
     uint8_t* pkt_ptr = rte_pktmbuf_mtod(mbuf, uint8_t*);
     encode_ether_hdr(pkt_ptr, dst_mac, src_mac, RTE_ETHER_TYPE_IPV4);
+
     pkt_ptr += sizeof(struct rte_ether_hdr);
     encode_ipv4_hdr(pkt_ptr, tip, sip, IPPROTO_ICMP);
+
     pkt_ptr += sizeof(struct rte_ipv4_hdr);
     encode_icmp_hdr(pkt_ptr, RTE_IP_ICMP_ECHO_REPLY, 0, id, seqnb);
 
@@ -119,8 +141,39 @@ struct rte_mbuf* get_arp_pkt(struct rte_mempool* mbuf_pool
 
     uint8_t* pkt_ptr = rte_pktmbuf_mtod(mbuf, uint8_t*);
     encode_ether_hdr(pkt_ptr, dst_mac, src_mac, RTE_ETHER_TYPE_ARP);
+
     pkt_ptr += sizeof(struct rte_ether_hdr);
     encode_arp_hdr(pkt_ptr, opcode, dst_mac, src_mac, tip, sip);
+
+    return mbuf;
+}
+
+struct rte_mbuf* get_udp_pkt(struct rte_mempool* mbuf_pool
+                            , uint8_t* data
+                            , uint16_t length
+                            , uint8_t* dst_mac
+                            , uint8_t* src_mac
+                            , uint32_t dst_ip
+                            , uint32_t src_ip
+                            , uint16_t dst_port
+                            , uint16_t src_port) {
+    unsigned total_length = length + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
+
+    struct rte_mbuf* mbuf = rte_pktmbuf_alloc(mbuf_pool);
+    if (!mbuf) {
+        LOGGER_WARN("rte_pktmbuf_alloc udp buf error");
+        return NULL;
+    }
+    mbuf->data_len = total_length;
+    mbuf->pkt_len = total_length;
+
+    uint8_t* pkt_ptr = rte_pktmbuf_mtod(mbuf, uint8_t*);
+    encode_ether_hdr(pkt_ptr, dst_mac, src_mac, RTE_ETHER_TYPE_IPV4);
+
+    pkt_ptr += sizeof(struct rte_ether_hdr);
+    encode_ipv4_hdr(pkt_ptr, dst_ip, src_ip, IPPROTO_UDP);
+
+    encode_udp_hdr(pkt_ptr, src_port, dst_port, data, length);
 
     return mbuf;
 }

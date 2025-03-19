@@ -1,12 +1,14 @@
 #include "dpip_logger.h"
 #include "dpip_pkt.h"
 #include "dpip_arptable.h"
+#include "dpip_socket.h"
 
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_ring.h>
 #include <rte_timer.h>
+#include <rte_malloc.h>
 
 #include <arpa/inet.h>
 
@@ -64,6 +66,50 @@ static void pkt_process_icmp(struct rte_mempool* mbuf_pool, uint8_t* pkt_ptr) {
     }
 }
 
+// 处理UDP数据包
+static void pkt_process_udp(__attribute__((unused)) struct rte_mempool* mbuf_pool, uint8_t* pkt_ptr) {
+    struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
+    struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
+    struct rte_udp_hdr* udp_hdr = (struct rte_udp_hdr*)(ip_hdr + 1);
+
+    char src_ip[INET_ADDRSTRLEN];
+    char dst_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &ip_hdr->src_addr, src_ip, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &ip_hdr->dst_addr, dst_ip, INET_ADDRSTRLEN);
+    LOGGER_DEBUG("<=========recv UDP========>src: %s:%d, dst: %s:%d, %s", src_ip, ntohs(udp_hdr->src_port), dst_ip, ntohs(udp_hdr->dst_port), (char*)(udp_hdr + 1));
+
+    struct socket_entry* sock_entry = get_socket_entry_by_ip_port_protocol(IPPROTO_UDP
+                                                                        , ip_hdr->dst_addr
+                                                                        , udp_hdr->dst_port
+                                                                        , ip_hdr->src_addr
+                                                                        , udp_hdr->src_port);
+    if (!sock_entry) {
+        LOGGER_WARN("udp socket not found");
+        return;
+    }
+    struct udp_datagram* datagram = (struct udp_datagram*) rte_malloc("udp_datagram", sizeof(struct udp_datagram), 0);
+    if (!datagram) {
+        LOGGER_WARN("rte_malloc udp_datagram error");
+        return;
+    }
+    datagram->src_ip = ip_hdr->src_addr;
+    datagram->dst_ip = ip_hdr->dst_addr;
+    datagram->src_port = udp_hdr->src_port;
+    datagram->dst_port = udp_hdr->dst_port;
+
+    datagram->length = rte_be_to_cpu_16(udp_hdr->dgram_len) - sizeof(struct rte_udp_hdr);
+    datagram->data = (uint8_t*) rte_malloc("udp_data", datagram->length, 0);
+    if (!datagram->data) {
+        LOGGER_WARN("rte_malloc udp_data error");
+        rte_free(datagram);
+        return;
+    }
+    rte_memcpy(datagram->data, udp_hdr + 1, datagram->length);
+
+    rte_ring_mp_enqueue(sock_entry->udp.recv_ring, datagram);
+    pthread_cond_signal(&sock_entry->cond);
+}
+
 // 处理IPV4数据包
 static void pkt_process_ipv4(struct rte_mempool* mbuf_pool, uint8_t* pkt_ptr) {
     struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
@@ -78,6 +124,11 @@ static void pkt_process_ipv4(struct rte_mempool* mbuf_pool, uint8_t* pkt_ptr) {
                 pkt_process_icmp(mbuf_pool, pkt_ptr);
                 break;
             }// ICMP数据包
+
+            case IPPROTO_UDP: {
+                pkt_process_udp(mbuf_pool, pkt_ptr);
+                break;
+            }// UDP数据包
 
             default:
                 break;
@@ -118,6 +169,50 @@ static void pkt_process_arp(struct rte_mempool* mbuf_pool, uint8_t* pkt_ptr) {
     }
 }
 
+// 处理socket实体中是否有数据包要发送
+static void process_socket_entries(struct rte_mempool* mbuf_pool) {
+    struct socket_table* sock_table = get_socket_table();
+    if (!sock_table) {
+        LOGGER_WARN("sock_table is NULL");
+        return;
+    }
+    pthread_rwlock_rdlock(&sock_table->rwlock);
+    for (struct socket_entry* entry = sock_table->head; entry; entry = entry->next) {
+        if (entry->protocol == SOCK_DGRAM) {
+            struct udp_datagram* datagram = NULL;
+            if (rte_ring_mc_dequeue(entry->udp.send_ring, (void**)&datagram) == 0) {
+
+                struct arp_entry* arp_entry = get_mac_by_ip(datagram->dst_ip);
+                if (!arp_entry) {
+                    struct rte_mbuf* arp_buf = get_arp_pkt(mbuf_pool
+                                                        , RTE_ARP_OP_REQUEST
+                                                        , gBroadcastMac
+                                                        , gSrcMac
+                                                        , datagram->dst_ip
+                                                        , datagram->src_ip);
+                    rte_ring_mp_enqueue(gOutPktRing, arp_buf);
+                    rte_ring_mp_enqueue(entry->udp.send_ring, datagram);
+                } else {
+                    struct rte_mbuf* udp_buf = get_udp_pkt(mbuf_pool
+                                                        , datagram->data
+                                                        , datagram->length
+                                                        , arp_entry->mac
+                                                        , gSrcMac
+                                                        , datagram->dst_ip
+                                                        , datagram->src_ip
+                                                        , datagram->dst_port
+                                                        , datagram->src_port);
+                    rte_ring_mp_enqueue(gOutPktRing, udp_buf);
+                    rte_free(datagram->data);
+                    rte_free(datagram);
+                }
+            }
+        }
+    }
+    pthread_rwlock_unlock(&sock_table->rwlock);
+}
+
+
 // 数据包处理函数
 static int pkt_process(void* arg) {
     struct rte_mempool* mbuf_pool = (struct rte_mempool*)arg;
@@ -154,6 +249,9 @@ static int pkt_process(void* arg) {
 
             rte_pktmbuf_free(mbufs[i]);
         } // for
+
+        process_socket_entries(mbuf_pool);
+
     } // while
     return 0;
 }
