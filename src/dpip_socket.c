@@ -38,7 +38,11 @@ struct socket_entry* get_socket_entry_by_ip_port_protocol(uint8_t protocol
                     return entry;
                 }
             } else if (entry->protocol == IPPROTO_TCP) {
-                // TODO
+                if (entry->tcp.local_ip == local_ip && entry->tcp.local_port == local_port 
+                    && entry->tcp.remote_ip == remote_ip && entry->tcp.remote_port == remote_port) {
+                    pthread_rwlock_unlock(&socket_table.rwlock);
+                    return entry;
+                }
             }
         }
         entry = entry->next;

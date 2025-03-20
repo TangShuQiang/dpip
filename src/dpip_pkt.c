@@ -101,6 +101,32 @@ void encode_udp_hdr(uint8_t* pkt_ptr
     udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr, udp_hdr);
 }
 
+void encode_tcp_hdr(uint8_t* pkt_ptr
+                    , uint16_t src_port
+                    , uint16_t dst_port
+                    , uint32_t seq
+                    , uint32_t ack
+                    , uint8_t flags
+                    , uint16_t rx_win
+                    , uint8_t* data
+                    , uint16_t length) {
+    struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)pkt_ptr;
+    struct rte_tcp_hdr* tcp_hdr = (struct rte_tcp_hdr*)(ip_hdr + 1);
+
+    tcp_hdr->src_port = src_port;
+    tcp_hdr->dst_port = dst_port;
+    tcp_hdr->sent_seq = rte_cpu_to_be_32(seq);
+    tcp_hdr->recv_ack = rte_cpu_to_be_32(ack);
+    tcp_hdr->data_off = 0x50;
+    tcp_hdr->tcp_flags = flags;
+    tcp_hdr->rx_win = rx_win;
+
+    rte_memcpy(tcp_hdr + 1, data, length);
+
+    tcp_hdr->cksum = 0;
+    tcp_hdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr, tcp_hdr);
+}
+
 struct rte_mbuf* get_icmp_pkt(struct rte_mempool* mbuf_pool
                             , uint8_t* dst_mac
                             , uint8_t* src_mac
@@ -185,6 +211,39 @@ struct rte_mbuf* get_udp_pkt(struct rte_mempool* mbuf_pool
     return mbuf;
 }
 
+struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool
+                            , uint8_t* dst_mac
+                            , uint8_t* src_mac
+                            , struct tcp_segment* segment) {
+    // 默认 TCP的可选字段为空
+    unsigned total_length = segment->length + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr);
+
+    struct rte_mbuf* mbuf = rte_pktmbuf_alloc(mbuf_pool);
+    if (!mbuf) {
+        LOGGER_WARN("rte_pktmbuf_alloc tcp buf error");
+        return NULL;
+    }
+    mbuf->data_len = total_length;
+    mbuf->pkt_len = total_length;
+
+    uint8_t* pkt_ptr = rte_pktmbuf_mtod(mbuf, uint8_t*);
+    encode_ether_hdr(pkt_ptr, dst_mac, src_mac, RTE_ETHER_TYPE_IPV4);
+
+    pkt_ptr += sizeof(struct rte_ether_hdr);
+    encode_ipv4_hdr(pkt_ptr, segment->dst_ip, segment->src_ip, IPPROTO_TCP, total_length - sizeof(struct rte_ether_hdr));
+
+    encode_tcp_hdr(pkt_ptr
+                , segment->src_port
+                , segment->dst_port
+                , segment->seq
+                , segment->ack
+                , segment->flags
+                , segment->rx_win
+                , segment->data
+                , segment->length);
+    return mbuf;
+}
+
 // 处理ICMP数据包
 void pkt_process_icmp(struct dpip_nic* nic, uint8_t* pkt_ptr) {
     struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
@@ -265,6 +324,64 @@ void pkt_process_udp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_
     pthread_cond_signal(&sock_entry->notempty);
 }
 
+// 处理TCP数据包
+void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_ptr){
+    struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
+    struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
+    struct rte_tcp_hdr* tcp_hdr = (struct rte_tcp_hdr*)(ip_hdr + 1);
+
+    char src_ip[INET_ADDRSTRLEN];
+    char dst_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &ip_hdr->src_addr, src_ip, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &ip_hdr->dst_addr, dst_ip, INET_ADDRSTRLEN);
+    LOGGER_DEBUG("<=========recv TCP========>src: %s:%d, dst: %s:%d", src_ip, ntohs(tcp_hdr->src_port), dst_ip, ntohs(tcp_hdr->dst_port));
+
+    // 检查校验和
+    uint16_t cksum = tcp_hdr->cksum;
+    tcp_hdr->cksum = 0;
+    if (cksum != rte_ipv4_udptcp_cksum(ip_hdr, tcp_hdr)) {
+        LOGGER_WARN("tcp checksum error");
+        return;
+    }
+
+    struct socket_entry* sock_entry = get_socket_entry_by_ip_port_protocol(IPPROTO_TCP
+                                                                        , ip_hdr->dst_addr
+                                                                        , tcp_hdr->dst_port
+                                                                        , ip_hdr->src_addr
+                                                                        , tcp_hdr->src_port);
+    if (!sock_entry) {
+        // LOGGER_WARN("tcp socket not found");
+        return;
+    }
+    struct tcp_segment* segment = (struct tcp_segment*) rte_malloc("tcp_segment", sizeof(struct tcp_segment), 0);
+    if (!segment) {
+        LOGGER_WARN("rte_malloc tcp_segment error");
+        return;
+    }
+    segment->src_ip = ip_hdr->src_addr;
+    segment->dst_ip = ip_hdr->dst_addr;
+    segment->src_port = tcp_hdr->src_port;
+    segment->dst_port = tcp_hdr->dst_port;
+
+    segment->seq = rte_be_to_cpu_32(tcp_hdr->sent_seq);
+    segment->ack = rte_be_to_cpu_32(tcp_hdr->recv_ack);
+    segment->data_off = tcp_hdr->data_off;
+    segment->flags = tcp_hdr->tcp_flags;
+    segment->rx_win = tcp_hdr->rx_win;
+    segment->tcp_urp = rte_be_to_cpu_16(tcp_hdr->tcp_urp);
+    
+    segment->length = rte_be_to_cpu_16(ip_hdr->total_length) - sizeof(struct rte_ipv4_hdr) - sizeof(struct rte_tcp_hdr);
+
+    segment->data = (uint8_t*) rte_malloc("tcp_data", segment->length, 0);
+    if (!segment->data) {
+        LOGGER_WARN("rte_malloc tcp_data error");
+        rte_free(segment);
+        return;
+    }
+    rte_memcpy(segment->data, tcp_hdr + 1, segment->length);
+    pthread_cond_signal(&sock_entry->notempty);
+}
+
 // 处理IPv4数据包
 void pkt_process_ipv4(struct dpip_nic* nic, uint8_t* pkt_ptr) {
     struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
@@ -287,6 +404,11 @@ void pkt_process_ipv4(struct dpip_nic* nic, uint8_t* pkt_ptr) {
                 pkt_process_udp(nic, pkt_ptr);
                 break;
             }// UDP数据包
+
+            case IPPROTO_TCP: {
+                pkt_process_tcp(nic, pkt_ptr);
+                break;
+            }// TCP数据包
 
             default:
                 break;

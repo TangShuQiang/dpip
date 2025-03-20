@@ -2,6 +2,7 @@
 #define __DPIP_PKT_H__
 
 #include "dpip_nic.h"
+#include "dpip_socket.h"
 
 #include <rte_ether.h>
 #include <rte_timer.h>
@@ -52,6 +53,19 @@ void encode_udp_hdr(uint8_t* pkt_ptr
                     , uint16_t length);
 
 /*
+    编码TCP头部
+*/
+void encode_tcp_hdr(uint8_t* pkt_ptr
+                    , uint16_t src_port
+                    , uint16_t dst_port
+                    , uint32_t seq
+                    , uint32_t ack
+                    , uint8_t flags
+                    , uint16_t rx_win
+                    , uint8_t* data
+                    , uint16_t length);
+
+/*
     获得ICMP数据包
 */
 struct rte_mbuf* get_icmp_pkt(struct rte_mempool* mbuf_pool
@@ -86,6 +100,14 @@ struct rte_mbuf* get_udp_pkt(struct rte_mempool* mbuf_pool
                             , uint16_t src_port);
 
 /*
+    获得TCP数据包
+*/
+struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool  
+                            , uint8_t* dst_mac
+                            , uint8_t* src_mac
+                            , struct tcp_segment* segment);
+
+/*
     处理ICMP数据包
 */
 void pkt_process_icmp(struct dpip_nic* nic, uint8_t* pkt_ptr);
@@ -94,6 +116,11 @@ void pkt_process_icmp(struct dpip_nic* nic, uint8_t* pkt_ptr);
     处理UDP数据包
 */
 void pkt_process_udp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_ptr);
+
+/*
+    处理TCP数据包
+*/
+void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_ptr);
 
 /*
     处理IPv4数据包

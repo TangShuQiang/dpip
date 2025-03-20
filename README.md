@@ -1,4 +1,4 @@
-# dpp-基于DPDK的TCP/IP用户态协议栈
+# dpip-基于DPDK的TCP/IP用户态协议栈
 * [1. 环境配置](#1环境配置ubuntu1804dpdk19082)
 * [2. 协议的结构体信息](#2-协议的结构体信息)
 * [3. 遇到的BUGs](#3-遇到的bugs)
@@ -182,6 +182,19 @@ shell> sudo ip link set eth0 up
             uint16_t dst_port; // 目的端口
             uint16_t dgram_len; // 数据报长度(包括UDP头部)
             uint16_t dgram_cksum; // 数据报校验和
+        };
+
+    TCP头部：
+        struct rte_tcp_hdr {
+            uint16_t src_port;          // 源端口
+            uint16_t dst_port;          // 目的端口 
+            uint32_t sent_seq;          // 序列号
+            uint32_t recv_ack;          // 确认号
+            uint8_t data_off;           // 数据偏移
+            uint8_t tcp_flags;          // TCP标志
+            uint16_t rx_win;            // 接收窗口
+            uint16_t cksum;             // 校验和
+            uint16_t tcp_urp;           // 紧急指针
         };
 */
 

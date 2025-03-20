@@ -7,6 +7,22 @@
 
 #include <sys/socket.h>
 
+// TCP状态
+enum DPIP_TCP_STATUS
+{
+    DPIP_TCP_CLOSED = 0,        // 关闭
+    DPIP_TCP_LISTEN,            // 监听
+    DPIP_TCP_SYN_SENT,          // SYN已发送
+    DPIP_TCP_SYN_RECEIVED,      // SYN已接收
+    DPIP_TCP_ESTABLISHED,       // 已建立
+    DPIP_TCP_FIN_WAIT_1,        // FIN_WAIT_1
+    DPIP_TCP_FIN_WAIT_2,        // FIN_WAIT_2
+    DPIP_TCP_CLOSE_WAIT,        // CLOSE_WAIT
+    DPIP_TCP_CLOSING,           // CLOSING
+    DPIP_TCP_LAST_ACK,          // LAST_ACK
+    DPIP_TCP_TIME_WAIT,         // TIME_WAIT
+};
+
 // UDP 数据报
 struct udp_datagram
 {
@@ -22,7 +38,20 @@ struct udp_datagram
 // TCP 报文段
 struct tcp_segment
 {
+    uint32_t src_ip;    // 源IP地址
+    uint32_t dst_ip;    // 目的IP地址
+    uint16_t src_port;  // 源端口
+    uint16_t dst_port;  // 目的端口
 
+    uint32_t seq;       // 序列号
+    uint32_t ack;       // 确认号
+    uint8_t data_off;   // 数据偏移, 4bit，单位为4字节
+    uint8_t flags;      // TCP标志
+    uint16_t rx_win;    // 接收窗口
+    uint16_t tcp_urp;   // 紧急指针
+
+    uint16_t length;    // 数据的长度   (小端序)
+    uint8_t* data;      // 数据
 };
 
 // UDP 实体数据
@@ -38,7 +67,19 @@ struct udp_entry
 // TCP 实体数据
 struct tcp_entry
 {
+    uint32_t local_ip;              // 本地IP地址
+    uint16_t local_port;            // 本地端口
+    uint32_t remote_ip;             // 远程IP地址
+    uint16_t remote_port;           // 远程端口
 
+    struct rte_ring* recv_ring;     // 接收缓冲区
+    struct rte_ring* send_ring;     // 发送缓冲区
+
+    uint8_t status;                 // TCP状态
+
+    uint32_t seq;                   // 序列号
+    uint32_t ack;                   // 确认号
+    uint16_t rx_win;                // 接收窗口
 };
 
 // socket实体
