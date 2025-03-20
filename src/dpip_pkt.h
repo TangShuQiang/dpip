@@ -1,8 +1,10 @@
 #ifndef __DPIP_PKT_H__
 #define __DPIP_PKT_H__
 
-#include <rte_ether.h>
+#include "dpip_nic.h"
 
+#include <rte_ether.h>
+#include <rte_timer.h>
 
 /*
     编码数据包以太网头部
@@ -81,5 +83,45 @@ struct rte_mbuf* get_udp_pkt(struct rte_mempool* mbuf_pool
                             , uint32_t src_ip
                             , uint16_t dst_port
                             , uint16_t src_port);
+
+/*
+    处理ICMP数据包
+*/
+void pkt_process_icmp(struct dpip_nic* nic, uint8_t* pkt_ptr);
+
+/*
+    处理UDP数据包
+*/
+void pkt_process_udp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_ptr);
+
+/*
+    处理IPv4数据包
+*/
+void pkt_process_ipv4(struct dpip_nic* nic, uint8_t* pkt_ptr);
+
+/*
+    处理ARP数据包
+*/
+void pkt_process_arp(struct dpip_nic* nic, uint8_t* pkt_ptr);
+
+/*
+    处理socket实体中是否有数据要发送
+*/
+void process_socket_entries(struct dpip_nic* nic);
+
+/*
+    ARP请求定时器回调函数
+*/
+void arp_request_timer_cb(__attribute__((unused)) struct rte_timer* tim, void* arg);
+
+/*
+    子线程函数：从网卡接收数据包放到接收队列，从发送队列取出数据包发送到网卡
+*/ 
+int pkt_recv_send(void* arg);
+
+/*
+    子线程函数：处理接收队列中的数据包
+*/
+int pkt_process(void* arg);
 
 #endif
