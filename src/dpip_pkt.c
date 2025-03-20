@@ -25,11 +25,12 @@ void encode_ether_hdr(uint8_t* pkt_ptr
 void encode_ipv4_hdr(uint8_t* pkt_pkt
                     , uint32_t dst_ip
                     , uint32_t src_ip
-                    , uint8_t proto) {
+                    , uint8_t proto
+                    , uint16_t length) {
     struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)pkt_pkt;
     ip_hdr->version_ihl = 0x45;
     ip_hdr->type_of_service = 0;
-    ip_hdr->total_length = rte_cpu_to_be_16(sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr));
+    ip_hdr->total_length = rte_cpu_to_be_16(length);
     ip_hdr->packet_id = 0;
     ip_hdr->fragment_offset = 0;
     ip_hdr->time_to_live = 64;
@@ -107,7 +108,7 @@ struct rte_mbuf* get_icmp_pkt(struct rte_mempool* mbuf_pool
                             , uint32_t sip
                             , uint16_t id
                             , uint16_t seqnb) {
-    unsigned total_length = sizeof(struct rte_ether_hdr) +sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr);
+    unsigned total_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_icmp_hdr);
     
     struct rte_mbuf* mbuf = rte_pktmbuf_alloc(mbuf_pool); 
     if (!mbuf) {
@@ -121,7 +122,7 @@ struct rte_mbuf* get_icmp_pkt(struct rte_mempool* mbuf_pool
     encode_ether_hdr(pkt_ptr, dst_mac, src_mac, RTE_ETHER_TYPE_IPV4);
 
     pkt_ptr += sizeof(struct rte_ether_hdr);
-    encode_ipv4_hdr(pkt_ptr, tip, sip, IPPROTO_ICMP);
+    encode_ipv4_hdr(pkt_ptr, tip, sip, IPPROTO_ICMP, total_length - sizeof(struct rte_ether_hdr));
 
     pkt_ptr += sizeof(struct rte_ipv4_hdr);
     encode_icmp_hdr(pkt_ptr, RTE_IP_ICMP_ECHO_REPLY, 0, id, seqnb);
@@ -177,7 +178,7 @@ struct rte_mbuf* get_udp_pkt(struct rte_mempool* mbuf_pool
     encode_ether_hdr(pkt_ptr, dst_mac, src_mac, RTE_ETHER_TYPE_IPV4);
 
     pkt_ptr += sizeof(struct rte_ether_hdr);
-    encode_ipv4_hdr(pkt_ptr, dst_ip, src_ip, IPPROTO_UDP);
+    encode_ipv4_hdr(pkt_ptr, dst_ip, src_ip, IPPROTO_UDP, total_length - sizeof(struct rte_ether_hdr));
 
     encode_udp_hdr(pkt_ptr, src_port, dst_port, data, length);
 
@@ -224,13 +225,21 @@ void pkt_process_udp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_
     inet_ntop(AF_INET, &ip_hdr->dst_addr, dst_ip, INET_ADDRSTRLEN);
     LOGGER_DEBUG("<=========recv UDP========>src: %s:%d, dst: %s:%d, %s", src_ip, ntohs(udp_hdr->src_port), dst_ip, ntohs(udp_hdr->dst_port), (char*)(udp_hdr + 1));
 
+    // 检查校验和
+    uint16_t cksum = udp_hdr->dgram_cksum;
+    udp_hdr->dgram_cksum = 0;
+    if (cksum != rte_ipv4_udptcp_cksum(ip_hdr, udp_hdr)) {
+        LOGGER_WARN("udp checksum error");
+        return;
+    }
+
     struct socket_entry* sock_entry = get_socket_entry_by_ip_port_protocol(IPPROTO_UDP
                                                                         , ip_hdr->dst_addr
                                                                         , udp_hdr->dst_port
                                                                         , ip_hdr->src_addr
                                                                         , udp_hdr->src_port);
     if (!sock_entry) {
-        LOGGER_WARN("udp socket not found");
+        // LOGGER_WARN("udp socket not found");
         return;
     }
     struct udp_datagram* datagram = (struct udp_datagram*) rte_malloc("udp_datagram", sizeof(struct udp_datagram), 0);
@@ -253,7 +262,7 @@ void pkt_process_udp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_
     rte_memcpy(datagram->data, udp_hdr + 1, datagram->length);
 
     rte_ring_mp_enqueue(sock_entry->udp.recv_ring, datagram);
-    pthread_cond_signal(&sock_entry->cond);
+    pthread_cond_signal(&sock_entry->notempty);
 }
 
 // 处理IPv4数据包
@@ -261,8 +270,11 @@ void pkt_process_ipv4(struct dpip_nic* nic, uint8_t* pkt_ptr) {
     struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
     struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
 
-    // 判断目的IP地址是否是广播地址或者本地IP地址
-    if (ip_hdr->dst_addr == nic->broadcast_ip || ip_hdr->dst_addr == nic->local_ip) {
+    // // 判断目的IP地址是否是广播地址或者本地IP地址
+    // if (ip_hdr->dst_addr == nic->broadcast_ip || ip_hdr->dst_addr == nic->local_ip) {
+
+    // 判断目的IP地址是否是本地IP地址
+    if (ip_hdr->dst_addr == nic->local_ip) {
 
         switch (ip_hdr->next_proto_id) {
             // 判断是否为ICMP数据包
@@ -324,9 +336,11 @@ void process_socket_entries(struct dpip_nic* nic) {
     }
     pthread_rwlock_rdlock(&sock_table->rwlock);
     for (struct socket_entry* entry = sock_table->head; entry; entry = entry->next) {
-        if (entry->protocol == SOCK_DGRAM) {
+        if (entry->protocol == IPPROTO_UDP) {
             struct udp_datagram* datagram = NULL;
             if (rte_ring_mc_dequeue(entry->udp.send_ring, (void**)&datagram) == 0) {
+
+                pthread_cond_signal(&entry->notfull);
 
                 struct arp_entry* arp_entry = get_mac_by_ip(&nic->arp_table, datagram->dst_ip);
                 if (!arp_entry) {
@@ -338,6 +352,9 @@ void process_socket_entries(struct dpip_nic* nic) {
                                                         , datagram->dst_ip
                                                         , datagram->src_ip);
                     rte_ring_mp_enqueue(nic->out_pkt_ring, arp_buf);
+                    // 将数据包重新放入发送队列
+                    rte_ring_mp_enqueue(entry->udp.send_ring, datagram);
+                    LOGGER_DEBUG("udp sendring size=%d", rte_ring_count(entry->udp.send_ring));
                 } else {
                     struct rte_mbuf* udp_buf = get_udp_pkt(nic->pkt_send_pool
                                                         , datagram->data

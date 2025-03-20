@@ -1,5 +1,9 @@
 # dpp-基于DPDK的TCP/IP用户态协议栈
-## 1. 环境配置：Ubuntu18.04+DPDK19.08.2
+* [1. 环境配置](#1环境配置ubuntu1804dpdk19082)
+* [2. 协议的结构体信息](#2-协议的结构体信息)
+* [3. 遇到的BUGs](#3-遇到的bugs)
+
+## 1.环境配置：Ubuntu18.04+DPDK19.08.2
 ### 1.1 虚拟机配置两块网卡：桥接网卡（DPDK运行的网卡），NAT网卡（ssh连接的网卡）；
 ### 1.2 关机，修改网卡配置信息(Windows下虚拟机安装文件xxx.vmx)，以支持多队列网卡；
 ```C++
@@ -182,3 +186,7 @@ shell> sudo ip link set eth0 up
 */
 
 ```
+## 3. 遇到的BUGs
+1. IP头中的total_length字段是总长度(包括IP头部和数据)，一开始写的时候，没加上数据的长度，发送的UDP数据报用wireshark抓包显示**Length: 19 (bogus, payload length 8)**错误。
+
+2. arp_table 和 socket_table使用读写锁进行并发访问，在查询/更新时，找到数据就立刻返回，没有对锁进行释放，导致之后的线程再对其操作时得不到锁，导致死锁。

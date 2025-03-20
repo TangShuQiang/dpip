@@ -20,7 +20,8 @@ void encode_ether_hdr(uint8_t* pkt_ptr
 void encode_ipv4_hdr(uint8_t* pkt_pkt
                     , uint32_t dst_ip
                     , uint32_t src_ip
-                    , uint8_t proto);
+                    , uint8_t proto
+                    , uint16_t length);
 
 /*
     编码ICMP头部

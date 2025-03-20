@@ -25,6 +25,7 @@ struct arp_entry* get_mac_by_ip(struct arp_table* table, uint32_t ip) {
     struct arp_entry* entry = table->head;
     while (entry) {
         if (entry->ip == ip) {
+            pthread_rwlock_unlock(&table->rwlock);
             return entry;
         }
         entry = entry->next;
@@ -44,6 +45,7 @@ void update_arp_entry(struct arp_table* table, uint32_t ip, uint8_t* mac) {
     while (entry) {
         if (entry->ip == ip) {
             rte_ether_addr_copy((struct rte_ether_addr*)mac, (struct rte_ether_addr*)entry->mac);
+            pthread_rwlock_unlock(&table->rwlock);
             return;
         }
         entry = entry->next;

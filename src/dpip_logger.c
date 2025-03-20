@@ -21,14 +21,14 @@ void log_message(const char* color, const char* level, const char* file, const c
     if (len != -1) {
         // 输出到 stderr
         if (LOG_TO_CONSOLE) {
-            fprintf(stderr, "%s[%s] %s:%s:%d %s%s\n", color, level, file, func, line, buf, COLOR_RESET);
+            fprintf(stderr, "%s[%s] %s  %s  %d:%s%s\n", color, level, file, func, line, buf, COLOR_RESET);
         }
 
         // 输出到日志文件
         if (LOG_TO_FILE) {
             FILE* log_file = fopen(LOG_FILE_PATH, "a");
             if (log_file) {
-                fprintf(log_file, "[%s] %s:%s:%d %s\n", level, file, func, line, buf);
+                fprintf(log_file, "[%s] %s  %s  %d:%s\n", level, file, func, line, buf);
                 fflush(log_file);
                 fclose(log_file);
             } else {

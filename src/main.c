@@ -10,9 +10,53 @@
 #include <rte_lcore.h>
 #include <rte_malloc.h>
 
+#include <arpa/inet.h>
+
 const uint32_t IPv4_ADDR[] = {
     MAKE_IPV4_ADDR(114, 213, 212, 113),
 };
+
+// UDP server
+static void run_udp_server(void) {
+    LOGGER_DEBUG("run_udp_server");
+
+    int sockfd = dpip_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sockfd < 0) {
+        LOGGER_ERROR("dpip_socket error");
+        return;
+    }
+    LOGGER_DEBUG("sockfd=%d", sockfd);
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = MAKE_IPV4_ADDR(114, 213, 212, 113);
+    addr.sin_port = htons(8080);
+
+    if (dpip_bind(sockfd, (const struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        LOGGER_ERROR("dpip_bind error");
+        return;
+    }
+
+    LOGGER_DEBUG("dpip_bind success");
+
+    char buf[1024] = {0};
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t addrlen = sizeof(client_addr);
+        int len = dpip_recvfrom(sockfd, buf, sizeof(buf), 0, (struct sockaddr*)&client_addr, &addrlen);
+        if (len < 0) {
+            LOGGER_ERROR("dpip_recvfrom error");
+            break;
+        }
+        LOGGER_DEBUG("recvfrom %s:%d %s", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), buf);
+
+        len = dpip_sendto(sockfd, buf, len, 0, (struct sockaddr*)&client_addr, addrlen);
+        if (len < 0) {
+            LOGGER_ERROR("dpip_sendto error");
+            break;
+        }
+    }
+}
 
 int main(int argc, char* argv[]) {
     // 初始化DPDK环境
@@ -51,6 +95,8 @@ int main(int argc, char* argv[]) {
         rte_eal_remote_launch(pkt_process, &nic[port_id], lcord_id);
     }
     LOGGER_DEBUG("dpip_nic_init success");
+
+    run_udp_server();
 
     rte_eal_mp_wait_lcore();
 }

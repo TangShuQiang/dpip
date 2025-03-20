@@ -28,5 +28,10 @@
 // 2000000000 = 1s
 #define TIMER_RESOLUTION_CYCLES 2000000000ULL * 60 * 5     // 5min
 
+#define MAX_FD_COUNT            1024            // 最多文件描述符数量
+
+#define UDP_RECV_RING_SIZE      1024            // UDP接收环形队列大小
+#define UDP_SEND_RING_SIZE      1024            // UDP发送环形队列大小
+
 
 #endif
