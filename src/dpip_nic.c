@@ -91,16 +91,20 @@ int dpip_nic_init(struct dpip_nic* nic, uint16_t port_id, uint32_t local_ip) {
     }
 
     // 创建接收和发送数据包环形队列
-    nic->in_pkt_ring = rte_ring_create("in_pkt_ring", RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    char ring_name[32];
+    static int ring_id = 0;
+    snprintf(ring_name, sizeof(ring_name), "in_pkt_ring_id_%d", ring_id);
+    nic->in_pkt_ring = rte_ring_create(ring_name, RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
     if (!nic->in_pkt_ring) {
-        LOGGER_ERROR("rte_ring_create in_pkt_ring error");
+        LOGGER_ERROR("rte_ring_create %s error", ring_name);
         rte_mempool_free(nic->pkt_recv_pool);
         rte_mempool_free(nic->pkt_send_pool);
         return -1;
     }
-    nic->out_pkt_ring = rte_ring_create("out_pkt_ring", RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    snprintf(ring_name, sizeof(ring_name), "out_pkt_ring_id_%d", ring_id++);
+    nic->out_pkt_ring = rte_ring_create(ring_name, RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
     if (!nic->out_pkt_ring) {
-        LOGGER_ERROR("rte_ring_create out_pkt_ring error");
+        LOGGER_ERROR("rte_ring_create %s error", ring_name);
         rte_mempool_free(nic->pkt_recv_pool);
         rte_mempool_free(nic->pkt_send_pool);
         return -1;

@@ -54,34 +54,6 @@ struct tcp_segment
     uint8_t* data;      // 数据
 };
 
-// UDP 实体数据
-struct udp_entry
-{
-    uint32_t local_ip;              // 本地IP地址
-    uint16_t local_port;            // 本地端口
-
-    struct rte_ring* recv_ring;     // 接收缓冲区
-    struct rte_ring* send_ring;     // 发送缓冲区
-};
-
-// TCP 实体数据
-struct tcp_entry
-{
-    uint32_t local_ip;              // 本地IP地址
-    uint16_t local_port;            // 本地端口
-    uint32_t remote_ip;             // 远程IP地址
-    uint16_t remote_port;           // 远程端口
-
-    struct rte_ring* recv_ring;     // 接收缓冲区
-    struct rte_ring* send_ring;     // 发送缓冲区
-
-    uint8_t status;                 // TCP状态
-
-    uint32_t seq;                   // 序列号
-    uint32_t ack;                   // 确认号
-    uint16_t rx_win;                // 接收窗口
-};
-
 // socket实体
 struct socket_entry
 {
@@ -89,10 +61,35 @@ struct socket_entry
 
     uint8_t protocol;                   // 协议类型
 
-    union
-    {                             // 相关实体数据
-        struct udp_entry udp;
-        struct tcp_entry tcp;
+    union                               // 协议数据
+    {           
+        // UDP 实体数据
+        struct udp_entry
+        {
+            uint32_t local_ip;              // 本地IP地址
+            uint16_t local_port;            // 本地端口
+
+            struct rte_ring* recv_ring;     // 接收缓冲区
+            struct rte_ring* send_ring;     // 发送缓冲区
+        }udp;
+
+        // TCP 实体数据
+        struct tcp_entry
+        {
+            uint32_t local_ip;              // 本地IP地址
+            uint16_t local_port;            // 本地端口
+            uint32_t remote_ip;             // 远程IP地址
+            uint16_t remote_port;           // 远程端口
+
+            struct rte_ring* recv_ring;     // 接收缓冲区
+            struct rte_ring* send_ring;     // 发送缓冲区
+
+            uint8_t status;                 // TCP状态
+
+            uint32_t seq;                   // 序列号
+            uint32_t ack;                   // 确认号
+            uint16_t rx_win;                // 接收窗口
+        }tcp;
     };
 
     struct socket_entry* prev;
@@ -132,7 +129,7 @@ void add_socket_entry(struct socket_entry* entry);
 // 删除socket实体
 void del_socket_entry(struct socket_entry* entry);
 
-int dpip_socket(__attribute__((unused)) int domain
+int dpip_socket(int domain
                 , int type
                 , __attribute__((unused)) int protocol);
 
@@ -155,6 +152,9 @@ int dpip_recvfrom(int sockfd
                 , __attribute__((unused)) socklen_t* addrlen);
 
 int dpip_close(int sockfd);
+
+int dpip_listen(int sockfd
+                ,  __attribute__((unused)) int backlog);
 
 
 #endif

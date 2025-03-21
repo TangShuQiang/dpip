@@ -17,7 +17,7 @@
 #define LOG_LEVEL_ERROR     1       // 1 = 启用 error 日志, 0 = 禁用
 
 #define NUM_MBUFS 4096                // mbuf池大小
-#define RING_SIZE 4096                // 环形队列大小
+#define RING_SIZE 1024                // 环形队列大小
 #define BURST_SIZE 32                 // 数据包接收数量
 
 #define NUM_RX_DESC 1024               // 接收描述符数量
@@ -32,6 +32,11 @@
 
 #define UDP_RECV_RING_SIZE      1024            // UDP接收环形队列大小
 #define UDP_SEND_RING_SIZE      1024            // UDP发送环形队列大小
+
+#define TCP_RECV_RING_SIZE      1024            // TCP接收环形队列大小
+#define TCP_SEND_RING_SIZE      1024            // TCP发送环形队列大小
+
+#define TCP_MAX_SEQ             0xFFFFFFFF      // TCP最大序列号
 
 
 #endif

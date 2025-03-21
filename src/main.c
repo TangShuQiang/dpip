@@ -16,6 +16,7 @@ const uint32_t IPv4_ADDR[] = {
     MAKE_IPV4_ADDR(114, 213, 212, 113),
 };
 
+#if 0
 // UDP server
 static void run_udp_server(void) {
     LOGGER_DEBUG("run_udp_server");
@@ -57,6 +58,42 @@ static void run_udp_server(void) {
         }
     }
 }
+#endif
+
+// TCP serve
+static void run_tcp_server(void) {
+    LOGGER_DEBUG("run_tcp_server");
+
+    int sockfd = dpip_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sockfd < 0) {
+        LOGGER_ERROR("dpip_socket error");
+        return;
+    }
+    LOGGER_DEBUG("sockfd=%d", sockfd);
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = MAKE_IPV4_ADDR(114, 213, 212, 113);
+    addr.sin_port = htons(8080);
+
+    if (dpip_bind(sockfd, (const struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        LOGGER_ERROR("dpip_bind error");
+        return;
+    }
+
+    LOGGER_DEBUG("dpip_bind success");
+
+    if (dpip_listen(sockfd, 5) < 0) {
+        LOGGER_ERROR("dpip_listen error");
+        return;
+    }
+
+    LOGGER_DEBUG("dpip_listen success");
+
+    while (1) {
+        
+    }
+}
 
 int main(int argc, char* argv[]) {
     // 初始化DPDK环境
@@ -96,7 +133,9 @@ int main(int argc, char* argv[]) {
     }
     LOGGER_DEBUG("dpip_nic_init success");
 
-    run_udp_server();
+    // run_udp_server();
+
+    run_tcp_server();
 
     rte_eal_mp_wait_lcore();
 }

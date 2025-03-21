@@ -197,9 +197,10 @@ shell> sudo ip link set eth0 up
             uint16_t tcp_urp;           // 紧急指针
         };
 */
-
 ```
 ## 3. 遇到的BUGs
 1. IP头中的total_length字段是总长度(包括IP头部和数据)，一开始写的时候，没加上数据的长度，发送的UDP数据报用wireshark抓包显示**Length: 19 (bogus, payload length 8)**错误。
 
 2. arp_table 和 socket_table使用读写锁进行并发访问，在查询/更新时，找到数据就立刻返回，没有对锁进行释放，导致之后的线程再对其操作时得不到锁，导致死锁。
+
+3. 创建环形队列函数struct rte_ring* rte_ring_create(const char *name, unsigned count, int socket_id, unsigned flags)的第一个参数环形队列的名字name必须全局唯一，否则会创建失败，出现**RING: Cannot reserve memory**错误

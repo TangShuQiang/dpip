@@ -30,22 +30,41 @@ struct socket_entry* get_socket_entry_by_ip_port_protocol(uint8_t protocol
                                                         , __attribute__((unused)) uint16_t remote_port) {
     pthread_rwlock_rdlock(&socket_table.rwlock);
     struct socket_entry* entry = socket_table.head;
-    while (entry) {
-        if (entry->protocol == protocol) {
-            if (entry->protocol == IPPROTO_UDP) {
-                if (entry->udp.local_ip == local_ip && entry->udp.local_port == local_port) {
-                    pthread_rwlock_unlock(&socket_table.rwlock);
-                    return entry;
-                }
-            } else if (entry->protocol == IPPROTO_TCP) {
-                if (entry->tcp.local_ip == local_ip && entry->tcp.local_port == local_port 
-                    && entry->tcp.remote_ip == remote_ip && entry->tcp.remote_port == remote_port) {
-                    pthread_rwlock_unlock(&socket_table.rwlock);
-                    return entry;
-                }
+    if (protocol == IPPROTO_UDP) {
+        while (entry) {
+            if (entry->protocol == protocol
+                && entry->udp.local_ip == local_ip
+                && entry->udp.local_port == local_port) {
+                pthread_rwlock_unlock(&socket_table.rwlock);
+                return entry;
             }
+            entry = entry->next;
         }
-        entry = entry->next;
+    } else if (protocol == IPPROTO_TCP) {
+        // ESTABLISHED、 SYN_SENT、SYN_RECEIVED、FIN_WAIT_1、FIN_WAIT_2、CLOSING、CLOSED、LAST_ACK、TIME_WAIT
+        while (entry) {
+            if (entry->protocol == protocol
+                && entry->tcp.local_ip == local_ip
+                && entry->tcp.local_port == local_port
+                && entry->tcp.remote_ip == remote_ip
+                && entry->tcp.remote_port == remote_port) {
+                pthread_rwlock_unlock(&socket_table.rwlock);
+                return entry;
+            }
+            entry = entry->next;
+        }
+        // LISTEN
+        entry = socket_table.head;
+        while (entry) {
+            if (entry->protocol == protocol
+                && entry->tcp.local_ip == local_ip
+                && entry->tcp.local_port == local_port
+                && entry->tcp.status == DPIP_TCP_LISTEN) {
+                pthread_rwlock_unlock(&socket_table.rwlock);
+                return entry;
+            }
+            entry = entry->next;
+        }
     }
     pthread_rwlock_unlock(&socket_table.rwlock);
     return NULL;
@@ -104,9 +123,20 @@ static int get_free_fd_from_bitmap(void) {
     return -1;
 }
 
-int dpip_socket(__attribute__((unused)) int domain
+// 释放文件描述符
+static void free_fd_to_bitmap(int fd) {
+    pthread_rwlock_wrlock(&socket_table.rwlock);
+    socket_table.fd_bitmap[fd / 8] &= ~(1 << (fd % 8));
+    pthread_rwlock_unlock(&socket_table.rwlock);
+}
+
+int dpip_socket(int domain
                 , int type
                 , __attribute__((unused)) int protocol) {
+    if (domain != AF_INET) {
+        LOGGER_ERROR("only support AF_INET");
+        return -1;
+    }
     int fd = get_free_fd_from_bitmap();
     if (fd == -1) {
         LOGGER_ERROR("no free fd");
@@ -116,6 +146,7 @@ int dpip_socket(__attribute__((unused)) int domain
         struct socket_entry* entry = (struct socket_entry*)rte_malloc("socket_entry", sizeof(struct socket_entry), 0);
         if (!entry) {
             LOGGER_ERROR("rte_malloc socket_entry error");
+            free_fd_to_bitmap(fd);
             return -1;
         }
         memset(entry, 0, sizeof(struct socket_entry));
@@ -128,17 +159,64 @@ int dpip_socket(__attribute__((unused)) int domain
         struct udp_entry* udp = &entry->udp;
         udp->local_ip = 0;
         udp->local_port = 0;
-        udp->recv_ring = rte_ring_create("udp_recv_ring", UDP_RECV_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+        // 给ring命名
+        char ring_name[32];
+        static int udp_ring_id = 0;
+        snprintf(ring_name, sizeof(ring_name), "udp_recv_ring_id_%d", udp_ring_id);
+        udp->recv_ring = rte_ring_create(ring_name, UDP_RECV_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
         if (!udp->recv_ring) {
-            LOGGER_ERROR("rte_ring_create udp_recv_ring error");
+            LOGGER_ERROR("rte_ring_create %s error", ring_name);
             rte_free(entry);
+            free_fd_to_bitmap(fd);
             return -1;
         }
-        udp->send_ring = rte_ring_create("udp_send_ring", UDP_SEND_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+        snprintf(ring_name, sizeof(ring_name), "udp_send_ring_id_%d", udp_ring_id++);
+        udp->send_ring = rte_ring_create(ring_name, UDP_SEND_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
         if (!udp->send_ring) {
-            LOGGER_ERROR("rte_ring_create udp_send_ring error");
+            LOGGER_ERROR("rte_ring_create %s error", ring_name);
             rte_ring_free(udp->recv_ring);
             rte_free(entry);
+            free_fd_to_bitmap(fd);
+            return -1;
+        }
+        add_socket_entry(entry);
+    } else if (type == SOCK_STREAM) {
+        struct socket_entry* entry = (struct socket_entry*)rte_malloc("socket_entry", sizeof(struct socket_entry), 0);
+        if (!entry) {
+            LOGGER_ERROR("rte_malloc socket_entry error");
+            free_fd_to_bitmap(fd);
+            return -1;
+        }
+        memset(entry, 0, sizeof(struct socket_entry));
+        entry->protocol = IPPROTO_TCP;
+        entry->fd = fd;
+        pthread_cond_init(&entry->notfull, NULL);
+        pthread_cond_init(&entry->notempty, NULL);
+        pthread_mutex_init(&entry->mutex, NULL);
+
+        struct tcp_entry* tcp = &entry->tcp;
+        tcp->local_ip = 0;
+        tcp->local_port = 0;
+        tcp->remote_ip = 0;
+        tcp->remote_port = 0;
+        // 给ring命名
+        char ring_name[32];
+        static int tcp_ring_id = 0;
+        snprintf(ring_name, sizeof(ring_name), "tcp_socket_recv_ring_id_%d", tcp_ring_id);
+        tcp->recv_ring = rte_ring_create(ring_name, 2, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+        if (!tcp->recv_ring) {
+            LOGGER_ERROR("rte_ring_create %s error", ring_name);
+            rte_free(entry);
+            free_fd_to_bitmap(fd);
+            return -1;
+        }
+        snprintf(ring_name, sizeof(ring_name), "tcp_socket_send_ring_id_%d", tcp_ring_id++);
+        tcp->send_ring = rte_ring_create(ring_name, 2, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+        if (!tcp->send_ring) {
+            LOGGER_ERROR("rte_ring_create %s error", ring_name);
+            rte_ring_free(tcp->recv_ring);
+            rte_free(entry);
+            free_fd_to_bitmap(fd);
             return -1;
         }
         add_socket_entry(entry);
@@ -158,6 +236,10 @@ int dpip_bind(int sockfd
         const struct sockaddr_in* in_addr = (const struct sockaddr_in*)addr;
         entry->udp.local_ip = in_addr->sin_addr.s_addr;
         entry->udp.local_port = in_addr->sin_port;
+    } else if (entry->protocol == IPPROTO_TCP) {
+        const struct sockaddr_in* in_addr = (const struct sockaddr_in*)addr;
+        entry->tcp.local_ip = in_addr->sin_addr.s_addr;
+        entry->tcp.local_port = in_addr->sin_port;
     }
     return 0;
 }
@@ -252,5 +334,20 @@ int dpip_close(int sockfd) {
     }
     del_socket_entry(entry);
     rte_free(entry);
+    return 0;
+}
+
+int dpip_listen(int sockfd
+                , __attribute__((unused)) int backlog) {
+    struct socket_entry* entry = get_socket_entry_by_fd(sockfd);
+    if (!entry) {
+        LOGGER_WARN("socket entry not found");
+        return -1;
+    }
+    if (entry->protocol != IPPROTO_TCP) {
+        LOGGER_WARN("dpip_listen only support TCP protocol");
+        return -1;
+    }
+    entry->tcp.status = DPIP_TCP_LISTEN;
     return 0;
 }

@@ -108,29 +108,40 @@ struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool
                             , struct tcp_segment* segment);
 
 /*
+    处理 监听状态下（DPIP_TCP_LISTEN） 的TCP数据包
+*/
+void pkt_process_tcp_on_listen(__attribute__((unused)) struct socket_entry* sock_entry
+                                , uint8_t* pkt_ptr);
+
+/*
     处理ICMP数据包
 */
-void pkt_process_icmp(struct dpip_nic* nic, uint8_t* pkt_ptr);
+void pkt_process_icmp(struct dpip_nic* nic
+                    , uint8_t* pkt_ptr);
 
 /*
     处理UDP数据包
 */
-void pkt_process_udp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_ptr);
+void pkt_process_udp(__attribute__((unused)) struct dpip_nic* nic
+                    , uint8_t* pkt_ptr);
 
 /*
     处理TCP数据包
 */
-void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_ptr);
+void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic
+                    , uint8_t* pkt_ptr);
 
 /*
     处理IPv4数据包
 */
-void pkt_process_ipv4(struct dpip_nic* nic, uint8_t* pkt_ptr);
+void pkt_process_ipv4(struct dpip_nic* nic
+                    , uint8_t* pkt_ptr);
 
 /*
     处理ARP数据包
 */
-void pkt_process_arp(struct dpip_nic* nic, uint8_t* pkt_ptr);
+void pkt_process_arp(struct dpip_nic* nic
+                    , uint8_t* pkt_ptr);
 
 /*
     处理socket实体中是否有数据要发送
@@ -140,7 +151,8 @@ void process_socket_entries(struct dpip_nic* nic);
 /*
     ARP请求定时器回调函数
 */
-void arp_request_timer_cb(__attribute__((unused)) struct rte_timer* tim, void* arg);
+void arp_request_timer_cb(__attribute__((unused)) struct rte_timer* tim
+                        , void* arg);
 
 /*
     子线程函数：从网卡接收数据包放到接收队列，从发送队列取出数据包发送到网卡
