@@ -23,6 +23,6 @@ struct dpip_nic
 };
 
 // 初始化网卡
-int dpip_nic_init(struct dpip_nic* nic, uint16_t port_id, uint32_t local_ip);
+int dpip_nic_init(struct dpip_nic* nic, uint16_t port_id, uint32_t local_ip, uint32_t local_mask);
 
 #endif

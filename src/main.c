@@ -16,6 +16,10 @@ const uint32_t IPv4_ADDR[] = {
     MAKE_IPV4_ADDR(114, 213, 212, 113),
 };
 
+const uint32_t IPv4_MASK[] = {
+    MAKE_IPV4_ADDR(255, 255, 255, 0),
+};
+
 #if 0
 // UDP server
 static void run_udp_server(void) {
@@ -120,7 +124,7 @@ int main(int argc, char* argv[]) {
     unsigned lcord_id = rte_lcore_id(); // 获取执行单元的应用程序线程 ID
 
     for (uint16_t port_id = 0; port_id < nb_sys_ports; ++port_id) {
-        if (dpip_nic_init(&nic[port_id], port_id, IPv4_ADDR[port_id])) {
+        if (dpip_nic_init(&nic[port_id], port_id, IPv4_ADDR[port_id], IPv4_MASK[port_id])) {
             LOGGER_ERROR("dpip_nic_init port_id=%d error", port_id);
             return -1;
         }

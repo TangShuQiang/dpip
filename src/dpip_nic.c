@@ -8,7 +8,7 @@ const struct rte_eth_conf port_conf_default = {
 };
 
 // 初始化网卡
-int dpip_nic_init(struct dpip_nic* nic, uint16_t port_id, uint32_t local_ip) {
+int dpip_nic_init(struct dpip_nic* nic, uint16_t port_id, uint32_t local_ip, uint32_t local_mask) {
     if (!nic) {
         LOGGER_ERROR("nic is NULL");
         return -1;
@@ -21,7 +21,7 @@ int dpip_nic_init(struct dpip_nic* nic, uint16_t port_id, uint32_t local_ip) {
     nic->local_ip = local_ip;
 
     // 设置广播IP地址
-    nic->broadcast_ip = (nic->local_ip | 0xFF000000);
+    nic->broadcast_ip = (nic->local_ip | ~local_mask);
 
     // 获取源MAC地址
     rte_eth_macaddr_get(nic->port_id, (struct rte_ether_addr*)nic->local_mac);

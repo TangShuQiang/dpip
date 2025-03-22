@@ -244,6 +244,45 @@ struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool
     return mbuf;
 }
 
+void pkt_process_tcp_on_sys_received(__attribute__((unused)) struct socket_entry* sock_entry
+                            , uint8_t* pkt_ptr) {
+    struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
+    struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
+    struct rte_tcp_hdr* tcp_hdr = (struct rte_tcp_hdr*)(ip_hdr + 1);
+
+    // 服务端发送的SYN+ACK数据包（第二次握手）丢失，客户端重传SYN数据包（第一次握手）
+    if (tcp_hdr->tcp_flags & RTE_TCP_SYN_FLAG) {
+        struct tcp_segment* segment = (struct tcp_segment*) rte_malloc("tcp_segment", sizeof(struct tcp_segment), 0);
+        if (!segment) {
+            LOGGER_WARN("rte_malloc tcp_segment error");
+            return;
+        }
+        segment->src_ip = ip_hdr->dst_addr;
+        segment->dst_ip = ip_hdr->src_addr;
+        segment->src_port = tcp_hdr->dst_port;
+        segment->dst_port = tcp_hdr->src_port;
+        segment->seq = sock_entry->tcp.seq;
+        segment->ack = sock_entry->tcp.ack;
+        segment->data_off = 0x50;
+        segment->flags = (RTE_TCP_SYN_FLAG | RTE_TCP_ACK_FLAG);
+        segment->rx_win = sock_entry->tcp.rx_win;
+        segment->tcp_urp = 0;
+        segment->data = NULL;
+        segment->length = 0;
+
+        rte_ring_mp_enqueue(sock_entry->tcp.send_ring, segment);
+    } else if (tcp_hdr->tcp_flags & RTE_TCP_ACK_FLAG) {     // 客户端发送的ACK数据包（第三次握手）
+        // ack号不等于seq号+1，不是第三次握手
+        if (rte_cpu_to_be_32(tcp_hdr->recv_ack) != sock_entry->tcp.seq + 1) {
+            return;
+        }
+
+        sock_entry->tcp.status = DPIP_TCP_ESTABLISHED;
+        sock_entry->tcp.seq += 1;
+        sock_entry->tcp.ack = rte_be_to_cpu_32(tcp_hdr->sent_seq) + 1;
+    }
+}
+
 void pkt_process_tcp_on_listen(__attribute__((unused)) struct socket_entry* sock_entry
                                 , uint8_t* pkt_ptr) {
     struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
@@ -438,6 +477,7 @@ void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_
             break;
         }
         case DPIP_TCP_SYN_RECEIVED: {
+            pkt_process_tcp_on_sys_received(sock_entry, pkt_ptr);
             break;
         }
         case DPIP_TCP_ESTABLISHED: {
@@ -513,7 +553,7 @@ void pkt_process_arp(struct dpip_nic* nic, uint8_t* pkt_ptr) {
         char dst_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &arp_hdr->arp_data.arp_sip, src_ip, INET_ADDRSTRLEN);
         inet_ntop(AF_INET, &arp_hdr->arp_data.arp_tip, dst_ip, INET_ADDRSTRLEN);
-        LOGGER_DEBUG("<=========recv ARP========>src: %s, dst: %s, arp_opcode: %d", src_ip, dst_ip, rte_be_to_cpu_16(arp_hdr->arp_opcode));
+        // LOGGER_DEBUG("<=========recv ARP========>src: %s, dst: %s, arp_opcode: %d", src_ip, dst_ip, rte_be_to_cpu_16(arp_hdr->arp_opcode));
 
         if (rte_be_to_cpu_16(arp_hdr->arp_opcode) == RTE_ARP_OP_REQUEST) {
 

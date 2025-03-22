@@ -95,6 +95,28 @@ shell> sudo ./usertools/dpdk-devbind.py --status
 
 shell> sudo ip link set eth0 up
 ```
+### 1.10 使用rte_eal_init()初始化DPDK环境出现"Cannot get hugepage information"错误
+```shell
+# 检查当前的挂载情况
+shell> cat /proc/meminfo | grep Huge
+
+# 如果没有挂载成功
+shell> sudo mkdir -p /mnt/huge                          # 创建挂载点并挂载大页内存
+shell> sudo mount -t hugetlbfs pagesize=1G /mnt/huge
+shell> df -h | grep huge                                # 确认挂载是否成功
+
+# 检查当前 HugePages 设置
+shell>  cat /proc/sys/vm/nr_hugepages               
+0                                                       # 0 说明 HugePages 没有被配置
+
+# 手动分配 HugePages
+shell>  sudo sysctl -w vm.nr_hugepages=20
+vm.nr_hugepages = 20
+
+# 确认分配成功
+shell> cat /proc/sys/vm/nr_hugepages
+2
+```
 ## 2. 协议的结构体信息
 ```C++
 /*
@@ -199,7 +221,7 @@ shell> sudo ip link set eth0 up
 */
 ```
 ## 3. 遇到的BUGs
-1. IP头中的total_length字段是总长度(包括IP头部和数据)，一开始写的时候，没加上数据的长度，发送的UDP数据报用wireshark抓包显示**Length: 19 (bogus, payload length 8)**错误。
+1. IP头中的total_length字段是总长度(包括IP头部和数据)，一开始写的时候，没加上数据的长度，发送的UDP数据报用wireshark抓包显示**Length: 19 (bogus, payload length 8)** 错误。
 
 2. arp_table 和 socket_table使用读写锁进行并发访问，在查询/更新时，找到数据就立刻返回，没有对锁进行释放，导致之后的线程再对其操作时得不到锁，导致死锁。
 
