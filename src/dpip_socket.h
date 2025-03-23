@@ -89,21 +89,39 @@ struct socket_entry
             uint32_t seq;                   // 序列号
             uint32_t ack;                   // 确认号
             uint16_t rx_win;                // 接收窗口
+
+            struct socket_entry* syn_accept_queue;      // 半连接和全连接队列
+            uint32_t backlog;                           // 半连接队列和全连接队列的长度
+            uint32_t current_syn_queue_length;          // 当前半连接队列和全连接队列的长度
         }tcp;
     };
 
     struct socket_entry* prev;
     struct socket_entry* next;
 
-    pthread_cond_t notfull;
-    pthread_cond_t notempty;
+    pthread_cond_t notfull;             // send_ring未满条件变量, 用于通知应用层可以继续发送数据
+    pthread_cond_t notempty;            // recv_ring非空条件变量, 用于通知应用层可以继续接收数据
     pthread_mutex_t mutex;
 };
+
+// 查找半连接
+struct socket_entry* get_syn_by_ip_port(struct socket_entry* tcp_entry
+                                        , uint32_t local_ip
+                                        , uint16_t local_port
+                                        , uint32_t remote_ip
+                                        , uint16_t remote_port);
+// 查找全连接
+struct socket_entry* get_accept_by_ip_port(struct socket_entry* tcp_entry
+                                        , uint32_t local_ip
+                                        , uint16_t local_port
+                                        , uint32_t remote_ip
+                                        , uint16_t remote_port);
 
 // socket表
 struct socket_table
 {
-    struct socket_entry* head;
+    struct socket_entry* udp_entry_head;
+    struct socket_entry* tcp_entry_head;
 
     uint8_t fd_bitmap[MAX_FD_COUNT / 8];
 
@@ -154,7 +172,7 @@ int dpip_recvfrom(int sockfd
 int dpip_close(int sockfd);
 
 int dpip_listen(int sockfd
-                ,  __attribute__((unused)) int backlog);
+                , int backlog);
 
 
 #endif

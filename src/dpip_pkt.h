@@ -108,15 +108,9 @@ struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool
                             , struct tcp_segment* segment);
 
 /*
-    处理 RECV 状态下（DPIP_TCP_SYN_RECEIVED） 的TCP数据包
-*/
-void pkt_process_tcp_on_sys_received(__attribute__((unused)) struct socket_entry* sock_entry
-                            , uint8_t* pkt_ptr);
-
-/*
     处理 监听状态下（DPIP_TCP_LISTEN） 的TCP数据包
 */
-void pkt_process_tcp_on_listen(__attribute__((unused)) struct socket_entry* sock_entry
+void pkt_process_tcp_on_listen(struct socket_entry* tcp_sock_entry
                                 , uint8_t* pkt_ptr);
 
 /*

@@ -7,10 +7,152 @@
 
 static struct socket_table socket_table = { 0 };            // socket表
 
+// 查找半连接
+struct socket_entry* get_syn_by_ip_port(struct socket_entry* tcp_entry
+                                        , uint32_t local_ip
+                                        , uint16_t local_port
+                                        , uint32_t remote_ip
+                                        , uint16_t remote_port) {
+    pthread_mutex_lock(&tcp_entry->mutex);
+    // 如果已经存在全连接，则返回NULL(不再接受新的半连接)
+    struct socket_entry* entry = tcp_entry->tcp.syn_accept_queue;
+    while (entry) {
+        if (entry->tcp.local_ip == local_ip
+            && entry->tcp.local_port == local_port
+            && entry->tcp.remote_ip == remote_ip
+            && entry->tcp.remote_port == remote_port
+            && entry->tcp.status == DPIP_TCP_ESTABLISHED) {
+
+            pthread_mutex_unlock(&tcp_entry->mutex);
+            return NULL;
+        }
+        entry = entry->next;
+    }
+    // 不存在全连接，查找是否已经建立了半连接
+    while (entry) {
+        if (entry->tcp.local_ip == local_ip
+            && entry->tcp.local_port == local_port
+            && entry->tcp.remote_ip == remote_ip
+            && entry->tcp.remote_port == remote_port
+            && entry->tcp.status == DPIP_TCP_SYN_RECEIVED) {
+
+            pthread_mutex_unlock(&tcp_entry->mutex);
+            return entry;
+        }
+        entry = entry->next;
+    }
+    // 队列已满, 不再接受新的半连接
+    if (tcp_entry->tcp.current_syn_queue_length == tcp_entry->tcp.backlog) {
+        LOGGER_WARN("syn queue is full");
+
+        pthread_mutex_unlock(&tcp_entry->mutex);
+        return NULL;
+    }
+    // 创建新的半连接
+    struct socket_entry* new_entry = (struct socket_entry*) rte_malloc("socket_entry", sizeof(struct socket_entry), 0);
+    if (!new_entry) {
+        LOGGER_WARN("rte_malloc socket_entry error");
+
+        pthread_mutex_unlock(&tcp_entry->mutex);
+        return NULL;
+    }
+    memset(new_entry, 0, sizeof(struct socket_entry));
+    new_entry->fd = -1;
+    new_entry->protocol = IPPROTO_TCP;
+    new_entry->tcp.local_ip = local_ip;
+    new_entry->tcp.local_port = local_port;
+    new_entry->tcp.remote_ip = remote_ip;
+    new_entry->tcp.remote_port = remote_port;
+    new_entry->tcp.status = DPIP_TCP_SYN_RECEIVED;
+
+    pthread_cond_init(&new_entry->notfull, NULL);
+    pthread_cond_init(&new_entry->notempty, NULL);
+    pthread_mutex_init(&new_entry->mutex, NULL);
+
+    char ring_name[32] = { 0 };
+    static uint32_t ring_id = 0;
+    snprintf(ring_name, 32, "tcp_sys_recv_ring_%d", ring_id);
+    new_entry->tcp.recv_ring = rte_ring_create(ring_name, TCP_RECV_RING_SIZE, 0, RING_F_SC_DEQ | RING_F_SP_ENQ);
+    if (!new_entry->tcp.recv_ring) {
+        LOGGER_WARN("rte_ring_create tcp_sys_recv_ring error");
+        rte_free(new_entry);
+
+        pthread_mutex_unlock(&tcp_entry->mutex);
+        return NULL;
+    }
+    snprintf(ring_name, 32, "tcp_sys_send_ring_%d", ring_id++);
+    new_entry->tcp.send_ring = rte_ring_create(ring_name, TCP_SEND_RING_SIZE, 0, RING_F_SC_DEQ | RING_F_SP_ENQ);
+    if (!new_entry->tcp.send_ring) {
+        LOGGER_WARN("rte_ring_create tcp_sys_send_ring error");
+        rte_ring_free(new_entry->tcp.recv_ring);
+        rte_free(new_entry);
+
+        pthread_mutex_unlock(&tcp_entry->mutex);
+        return NULL;
+    }
+
+    new_entry->next = tcp_entry->tcp.syn_accept_queue;
+    if (tcp_entry->tcp.syn_accept_queue) {
+        tcp_entry->tcp.syn_accept_queue->prev = new_entry;
+    }
+    tcp_entry->tcp.syn_accept_queue = new_entry;
+    tcp_entry->tcp.current_syn_queue_length += 1;
+
+    pthread_mutex_unlock(&tcp_entry->mutex);
+    return new_entry;
+}
+
+// 查找全连接
+struct socket_entry* get_accept_by_ip_port(struct socket_entry* tcp_entry
+                                        , uint32_t local_ip
+                                        , uint16_t local_port
+                                        , uint32_t remote_ip
+                                        , uint16_t remote_port) {
+    pthread_mutex_lock(&tcp_entry->mutex);
+    // 是否已经存在全连接
+    struct socket_entry* entry = tcp_entry->tcp.syn_accept_queue;
+    while (entry) {
+        if (entry->tcp.local_ip == local_ip
+            && entry->tcp.local_port == local_port
+            && entry->tcp.remote_ip == remote_ip
+            && entry->tcp.remote_port == remote_port
+            && entry->tcp.status == DPIP_TCP_ESTABLISHED) {
+
+            pthread_mutex_unlock(&tcp_entry->mutex);
+            return entry;
+        }
+        entry = entry->next;
+    }
+    // 将存在的半连接转换为全连接
+    entry = tcp_entry->tcp.syn_accept_queue;
+    while (entry) {
+        if (entry->tcp.local_ip == local_ip
+            && entry->tcp.local_port == local_port
+            && entry->tcp.remote_ip == remote_ip
+            && entry->tcp.remote_port == remote_port
+            && entry->tcp.status == DPIP_TCP_SYN_RECEIVED) {
+
+            pthread_mutex_unlock(&tcp_entry->mutex);
+            return entry;
+        }
+        entry = entry->next;
+    }
+    pthread_mutex_unlock(&tcp_entry->mutex);
+    return NULL;
+}
+
 // 通过fd获取socket实体 
 struct socket_entry* get_socket_entry_by_fd(uint32_t fd) {
     pthread_rwlock_rdlock(&socket_table.rwlock);
-    struct socket_entry* entry = socket_table.head;
+    struct socket_entry* entry = socket_table.udp_entry_head;
+    while (entry) {
+        if (entry->fd == fd) {
+            pthread_rwlock_unlock(&socket_table.rwlock);
+            return entry;
+        }
+        entry = entry->next;
+    }
+    entry = socket_table.tcp_entry_head;
     while (entry) {
         if (entry->fd == fd) {
             pthread_rwlock_unlock(&socket_table.rwlock);
@@ -29,8 +171,8 @@ struct socket_entry* get_socket_entry_by_ip_port_protocol(uint8_t protocol
                                                         , __attribute__((unused)) uint32_t remote_ip
                                                         , __attribute__((unused)) uint16_t remote_port) {
     pthread_rwlock_rdlock(&socket_table.rwlock);
-    struct socket_entry* entry = socket_table.head;
     if (protocol == IPPROTO_UDP) {
+        struct socket_entry* entry = socket_table.udp_entry_head;
         while (entry) {
             if (entry->protocol == protocol
                 && entry->udp.local_ip == local_ip
@@ -42,6 +184,7 @@ struct socket_entry* get_socket_entry_by_ip_port_protocol(uint8_t protocol
         }
     } else if (protocol == IPPROTO_TCP) {
         // ESTABLISHED、 SYN_SENT、SYN_RECEIVED、FIN_WAIT_1、FIN_WAIT_2、CLOSING、CLOSED、LAST_ACK、TIME_WAIT
+        struct socket_entry* entry = socket_table.tcp_entry_head;
         while (entry) {
             if (entry->protocol == protocol
                 && entry->tcp.local_ip == local_ip
@@ -54,7 +197,7 @@ struct socket_entry* get_socket_entry_by_ip_port_protocol(uint8_t protocol
             entry = entry->next;
         }
         // LISTEN
-        entry = socket_table.head;
+        entry = socket_table.tcp_entry_head;
         while (entry) {
             if (entry->protocol == protocol
                 && entry->tcp.local_ip == local_ip
@@ -78,25 +221,43 @@ struct socket_table* get_socket_table(void) {
 // 添加socket实体
 void add_socket_entry(struct socket_entry* entry) {
     pthread_rwlock_wrlock(&socket_table.rwlock);
-    entry->next = socket_table.head;
-    if (socket_table.head) {
-        socket_table.head->prev = entry;
+    if (entry->protocol == IPPROTO_UDP) {
+        entry->next = socket_table.udp_entry_head;
+        if (socket_table.udp_entry_head) {
+            socket_table.udp_entry_head->prev = entry;
+        }
+        socket_table.udp_entry_head = entry;
+    } else if (entry->protocol == IPPROTO_TCP) {
+        entry->next = socket_table.tcp_entry_head;
+        if (socket_table.tcp_entry_head) {
+            socket_table.tcp_entry_head->prev = entry;
+        }
+        socket_table.tcp_entry_head = entry;
     }
-    socket_table.head = entry;
     pthread_rwlock_unlock(&socket_table.rwlock);
 }
 
 // 删除socket实体
 void del_socket_entry(struct socket_entry* entry) {
     pthread_rwlock_wrlock(&socket_table.rwlock);
-    if (entry->prev) {
-        entry->prev->next = entry->next;
-    }
-    if (entry->next) {
-        entry->next->prev = entry->prev;
-    }
-    if (socket_table.head == entry) {
-        socket_table.head = entry->next;
+    if (entry->protocol == IPPROTO_UDP) {
+        if (entry->prev) {
+            entry->prev->next = entry->next;
+        } else {
+            socket_table.udp_entry_head = entry->next;
+        }
+        if (entry->next) {
+            entry->next->prev = entry->prev;
+        }
+    } else if (entry->protocol == IPPROTO_TCP) {
+        if (entry->prev) {
+            entry->prev->next = entry->next;
+        } else {
+            socket_table.tcp_entry_head = entry->next;
+        }
+        if (entry->next) {
+            entry->next->prev = entry->prev;
+        }
     }
     // 回收文件描述符
     int fd = entry->fd;
@@ -338,7 +499,11 @@ int dpip_close(int sockfd) {
 }
 
 int dpip_listen(int sockfd
-                , __attribute__((unused)) int backlog) {
+                , int backlog) {
+    if (backlog <= 0) {
+        LOGGER_WARN("backlog must be greater than 0");
+        return -1;
+    }
     struct socket_entry* entry = get_socket_entry_by_fd(sockfd);
     if (!entry) {
         LOGGER_WARN("socket entry not found");
@@ -348,6 +513,9 @@ int dpip_listen(int sockfd
         LOGGER_WARN("dpip_listen only support TCP protocol");
         return -1;
     }
+    pthread_mutex_lock(&entry->mutex);
     entry->tcp.status = DPIP_TCP_LISTEN;
+    entry->tcp.backlog = backlog;
+    pthread_mutex_unlock(&entry->mutex);
     return 0;
 }
