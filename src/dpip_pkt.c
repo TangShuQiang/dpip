@@ -333,6 +333,7 @@ void pkt_process_tcp_on_established(struct socket_entry* tcp_sock_entry
     rte_ring_mp_enqueue(tcp_sock_entry->tcp.recv_ring, segment);
 
     if (tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG) {
+        tcp_sock_entry->tcp.ack += 1;       // FIN占用一个序列号
         pkt_process_tcp_send_ack(tcp_sock_entry, pkt_ptr);
         tcp_sock_entry->tcp.status = DPIP_TCP_CLOSE_WAIT;
 
@@ -440,8 +441,15 @@ void pkt_process_tcp_on_listen(struct socket_entry* tcp_sock_entry
         } else if (accept_sock_entry->tcp.status == DPIP_TCP_ESTABLISHED) {
             // 接收数据包
             pkt_process_tcp_on_established(accept_sock_entry, pkt_ptr);
+        } else if (accept_sock_entry->tcp.status == DPIP_TCP_LAST_ACK) {
+            pkt_process_tcp_on_last_ack(accept_sock_entry, pkt_ptr);
         }
     }
+}
+
+void pkt_process_tcp_on_last_ack(struct socket_entry* tcp_sock_entry
+                                , __attribute__((unused)) uint8_t* pkt_ptr) {
+    tcp_sock_entry->tcp.status = DPIP_TCP_CLOSED;
 }
 
 // 处理ICMP数据包
@@ -585,6 +593,7 @@ void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_
             break;
         }
         case DPIP_TCP_LAST_ACK: {
+            pkt_process_tcp_on_last_ack(tcp_sock_entry, pkt_ptr);
             break;
         }
         case DPIP_TCP_TIME_WAIT: {
