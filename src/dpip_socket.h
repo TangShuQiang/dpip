@@ -57,7 +57,7 @@ struct tcp_segment
 // socket实体
 struct socket_entry
 {
-    uint32_t fd;                        // 文件描述符
+    int32_t fd;                        // 文件描述符
 
     uint8_t protocol;                   // 协议类型
 
@@ -90,9 +90,14 @@ struct socket_entry
             uint32_t ack;                   // 确认号，期望收到的下一个序列号
             uint16_t rx_win;                // 接收窗口
 
-            struct socket_entry* syn_accept_queue;      // 半连接和全连接队列
-            uint32_t backlog;                           // 半连接队列和全连接队列的长度
-            uint32_t current_syn_queue_length;          // 当前半连接队列和全连接队列的长度
+            struct socket_entry* syn_queue;      // 半连接队列
+            struct socket_entry* accept_queue;   // 全连接队列
+            uint32_t syn_queue_length;           // 半连接队列的长度
+            uint32_t backlog;                    // 全连接队列的长度
+            uint32_t current_syn_queue_length;   // 当前半连接队列的长度
+            uint32_t current_accept_queue_length;    // 当前全连接队列的长度
+
+            pthread_cond_t accept_queue_not_empty;   // 全连接队列非空条件变量
         }tcp;
     };
 
@@ -105,13 +110,13 @@ struct socket_entry
 };
 
 // 查找半连接
-struct socket_entry* get_syn_by_ip_port(struct socket_entry* tcp_entry
+struct socket_entry* get_syn_by_ip_port(struct socket_entry* listen_sock_entry
                                         , uint32_t local_ip
                                         , uint16_t local_port
                                         , uint32_t remote_ip
                                         , uint16_t remote_port);
 // 查找全连接
-struct socket_entry* get_accept_by_ip_port(struct socket_entry* tcp_entry
+struct socket_entry* get_accept_by_ip_port(struct socket_entry* listen_sock_entry
                                         , uint32_t local_ip
                                         , uint16_t local_port
                                         , uint32_t remote_ip
@@ -129,7 +134,7 @@ struct socket_table
 };
 
 // 通过fd获取socket实体
-struct socket_entry* get_socket_entry_by_fd(uint32_t fd);
+struct socket_entry* get_socket_entry_by_fd(int32_t fd);
 
 // 通过协议、IP地址和端口号获取socket实体
 struct socket_entry* get_socket_entry_by_ip_port_protocol(uint8_t protocol
@@ -174,5 +179,18 @@ int dpip_close(int sockfd);
 int dpip_listen(int sockfd
                 , int backlog);
 
+int dpip_accept(int sockfd
+                , struct sockaddr* addr
+                , __attribute__((unused)) socklen_t* addrlen);
+
+int dpip_recv(int sockfd
+            , void* buf
+            , size_t len
+            , __attribute__((unused)) int flags);
+
+int dpip_send(int sockfd
+            , const void* buf
+            , size_t len
+            , __attribute__((unused)) int flags);
 
 #endif

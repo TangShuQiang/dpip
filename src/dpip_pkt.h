@@ -128,14 +128,20 @@ void pkt_process_tcp_on_established(struct socket_entry* tcp_sock_entry
 /*
     处理 监听状态下（DPIP_TCP_LISTEN） 的TCP数据包
 */
-void pkt_process_tcp_on_listen(struct socket_entry* tcp_sock_entry
+void pkt_process_tcp_on_listen(struct socket_entry* listen_sock_entry
                                 , uint8_t* pkt_ptr);
 
 /*
     处理 LAST_ACK 状态下（DPIP_TCP_LAST_ACK） 的TCP数据包
 */
 void pkt_process_tcp_on_last_ack(struct socket_entry* tcp_sock_entry
-                                , __attribute__((unused)) uint8_t* pkt_ptr);
+                                , uint8_t* pkt_ptr);
+
+/*
+    处理 CLOSE_WAIT 状态下（DPIP_TCP_CLOSE_WAIT） 的TCP数据包
+*/
+void pkt_process_tcp_on_close_wait(struct socket_entry* tcp_sock_entry
+                                , uint8_t* pkt_ptr);
 
 /*
     处理ICMP数据包

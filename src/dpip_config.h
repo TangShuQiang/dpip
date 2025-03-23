@@ -39,4 +39,7 @@
 #define TCP_MAX_SEQ             0xFFFFFFFF      // TCP最大序列号
 
 
+#define DPIP_TCP_SYN_QUEUE_MAX_LENGTH   2         // TCP半连接队列最大长度
+
+
 #endif
