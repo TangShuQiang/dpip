@@ -64,6 +64,7 @@ struct socket_entry* get_syn_by_ip_port(struct socket_entry* tcp_entry
     new_entry->tcp.remote_ip = remote_ip;
     new_entry->tcp.remote_port = remote_port;
     new_entry->tcp.status = DPIP_TCP_SYN_RECEIVED;
+    new_entry->tcp.seq = TCP_MAX_SEQ;
 
     pthread_cond_init(&new_entry->notfull, NULL);
     pthread_cond_init(&new_entry->notempty, NULL);

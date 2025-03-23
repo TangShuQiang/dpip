@@ -108,6 +108,24 @@ struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool
                             , struct tcp_segment* segment);
 
 /*
+    发送ACK确认数据包
+*/
+void pkt_process_tcp_send_ack(struct socket_entry* tcp_sock_entry
+                            , uint8_t* pkt_ptr);
+
+/*
+    接收TCP数据包到接收缓冲区
+*/
+void pkt_process_tcp_recv(struct socket_entry* tcp_sock_entry
+                        , uint8_t* pkt_ptr);
+
+/*
+    处理 ESTABLISHED 状态下（DPIP_TCP_ESTABLISHED） 的TCP数据包
+*/
+void pkt_process_tcp_on_established(struct socket_entry* tcp_sock_entry
+                                    , uint8_t* pkt_ptr);
+
+/*
     处理 监听状态下（DPIP_TCP_LISTEN） 的TCP数据包
 */
 void pkt_process_tcp_on_listen(struct socket_entry* tcp_sock_entry

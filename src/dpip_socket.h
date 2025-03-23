@@ -86,8 +86,8 @@ struct socket_entry
 
             uint8_t status;                 // TCP状态
 
-            uint32_t seq;                   // 序列号
-            uint32_t ack;                   // 确认号
+            uint32_t seq;                   // 序列号，对端期望的下一个序列号
+            uint32_t ack;                   // 确认号，期望收到的下一个序列号
             uint16_t rx_win;                // 接收窗口
 
             struct socket_entry* syn_accept_queue;      // 半连接和全连接队列
