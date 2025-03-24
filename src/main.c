@@ -94,34 +94,37 @@ static void run_tcp_server(void) {
 
     LOGGER_DEBUG("dpip_listen success");
 
-    struct sockaddr_in client_addr;
-    socklen_t addrlen = sizeof(client_addr);
-    int fd = dpip_accept(sockfd, (struct sockaddr*)&client_addr, &addrlen);
-    if (fd < 0) {
-        LOGGER_ERROR("dpip_accept error");
-        return;
-    }
-    LOGGER_DEBUG("dpip_accept success, fd=%d", fd);
     while (1) {
-        LOGGER_DEBUG("accept %s:%d", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-
-        char buf[1024] = {0};
-        int len = dpip_recv(fd, buf, sizeof(buf), 0);
-        if (len < 0) {
-            LOGGER_ERROR("dpip_recv error");
-            break;
-        } else if (len == 0) {
-            LOGGER_DEBUG("client is closed");
-            break;
+        struct sockaddr_in client_addr;
+        socklen_t addrlen = sizeof(client_addr);
+        int fd = dpip_accept(sockfd, (struct sockaddr*)&client_addr, &addrlen);
+        if (fd < 0) {
+            LOGGER_ERROR("dpip_accept error");
+            return;
         }
-        LOGGER_DEBUG("recv %s", buf);
+        LOGGER_DEBUG("dpip_accept success, fd=%d", fd);
+        while (1) {
+            LOGGER_DEBUG("accept %s:%d", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
-        len = dpip_send(fd, buf, len, 0);
-        if (len < 0) {
-            LOGGER_ERROR("dpip_send error");
-            break;
+            char buf[1024] = {0};
+            int len = dpip_recv(fd, buf, sizeof(buf), 0);
+            if (len < 0) {
+                LOGGER_ERROR("dpip_recv error");
+                break;
+            } else if (len == 0) {
+                LOGGER_DEBUG("client is closed");
+                dpip_close(fd);
+                break;
+            }
+            LOGGER_DEBUG("recv %s", buf);
+
+            len = dpip_send(fd, buf, len, 0);
+            if (len < 0) {
+                LOGGER_ERROR("dpip_send error");
+                break;
+            }
+            LOGGER_DEBUG("send len=%d", len);
         }
-        LOGGER_DEBUG("send len=%d", len);
     }
 }
 

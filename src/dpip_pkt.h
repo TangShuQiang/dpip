@@ -110,14 +110,12 @@ struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool
 /*
     发送ACK确认数据包
 */
-void pkt_process_tcp_send_ack(struct socket_entry* tcp_sock_entry
-                            , uint8_t* pkt_ptr);
+void pkt_process_tcp_send_ack(struct socket_entry* tcp_sock_entry);
 
 /*
     发送FIN数据包
 */
-void pkt_process_tcp_send_fin(struct socket_entry* tcp_sock_entry
-                            , uint8_t* pkt_ptr);
+void pkt_process_tcp_send_fin(struct socket_entry* tcp_sock_entry);
 
 /*
     处理 ESTABLISHED 状态下（DPIP_TCP_ESTABLISHED） 的TCP数据包

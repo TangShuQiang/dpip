@@ -1,5 +1,6 @@
 #include "dpip_socket.h"
 #include "dpip_logger.h"
+#include "dpip_pkt.h"
 
 #include <rte_malloc.h>
 #include <rte_tcp.h>
@@ -364,25 +365,25 @@ int dpip_socket(int domain
         tcp->current_syn_queue_length = 0;
         tcp->current_accept_queue_length = 0;
         // 给ring命名
-        char ring_name[32];
-        static int tcp_ring_id = 0;
-        snprintf(ring_name, sizeof(ring_name), "tcp_socket_recv_ring_id_%d", tcp_ring_id);
-        tcp->recv_ring = rte_ring_create(ring_name, 2, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
-        if (!tcp->recv_ring) {
-            LOGGER_ERROR("rte_ring_create %s error", ring_name);
-            rte_free(entry);
-            free_fd_to_bitmap(fd);
-            return -1;
-        }
-        snprintf(ring_name, sizeof(ring_name), "tcp_socket_send_ring_id_%d", tcp_ring_id++);
-        tcp->send_ring = rte_ring_create(ring_name, 2, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
-        if (!tcp->send_ring) {
-            LOGGER_ERROR("rte_ring_create %s error", ring_name);
-            rte_ring_free(tcp->recv_ring);
-            rte_free(entry);
-            free_fd_to_bitmap(fd);
-            return -1;
-        }
+        // char ring_name[32];
+        // static int tcp_ring_id = 0;
+        // snprintf(ring_name, sizeof(ring_name), "tcp_socket_recv_ring_id_%d", tcp_ring_id);
+        // tcp->recv_ring = rte_ring_create(ring_name, 2, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+        // if (!tcp->recv_ring) {
+        //     LOGGER_ERROR("rte_ring_create %s error", ring_name);
+        //     rte_free(entry);
+        //     free_fd_to_bitmap(fd);
+        //     return -1;
+        // }
+        // snprintf(ring_name, sizeof(ring_name), "tcp_socket_send_ring_id_%d", tcp_ring_id++);
+        // tcp->send_ring = rte_ring_create(ring_name, 2, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+        // if (!tcp->send_ring) {
+        //     LOGGER_ERROR("rte_ring_create %s error", ring_name);
+        //     rte_ring_free(tcp->recv_ring);
+        //     rte_free(entry);
+        //     free_fd_to_bitmap(fd);
+        //     return -1;
+        // }
         add_socket_entry(entry);
     }
     return fd;
@@ -408,12 +409,12 @@ int dpip_bind(int sockfd
     return 0;
 }
 
-int dpip_sendto(int sockfd
-                , const void* buf
-                , size_t len
-                , __attribute__((unused)) int flags
-                , const struct sockaddr* dest_addr
-                , __attribute__((unused)) socklen_t addrlen) {
+ssize_t dpip_sendto(int sockfd
+                    , const void* buf
+                    , size_t len
+                    , __attribute__((unused)) int flags
+                    , const struct sockaddr* dest_addr
+                    , __attribute__((unused)) socklen_t addrlen) {
     struct socket_entry* entry = get_socket_entry_by_fd(sockfd);
     if (!entry) {
         LOGGER_WARN("socket entry not found");
@@ -451,12 +452,12 @@ int dpip_sendto(int sockfd
     return len;
 }
 
-int dpip_recvfrom(int sockfd
-                , void* buf
-                , size_t len
-                , __attribute__((unused)) int flags
-                , struct sockaddr* src_addr
-                , __attribute__((unused)) socklen_t* addrlen) {
+ssize_t dpip_recvfrom(int sockfd
+                    , void* buf
+                    , size_t len
+                    , __attribute__((unused)) int flags
+                    , struct sockaddr* src_addr
+                    , __attribute__((unused)) socklen_t* addrlen) {
     struct socket_entry* entry = get_socket_entry_by_fd(sockfd);
     if (!entry) {
         LOGGER_WARN("socket entry not found");
@@ -473,10 +474,12 @@ int dpip_recvfrom(int sockfd
         pthread_cond_wait(&entry->notempty, &entry->mutex);
     }
     pthread_mutex_unlock(&entry->mutex);
-    struct sockaddr_in* in_addr = (struct sockaddr_in*)src_addr;
-    in_addr->sin_family = AF_INET;
-    in_addr->sin_addr.s_addr = datagram->src_ip;
-    in_addr->sin_port = datagram->src_port;
+    if (src_addr) {
+        struct sockaddr_in* in_addr = (struct sockaddr_in*)src_addr;
+        in_addr->sin_family = AF_INET;
+        in_addr->sin_addr.s_addr = datagram->src_ip;
+        in_addr->sin_port = datagram->src_port;
+    }
     if (len > datagram->length) {
         len = datagram->length;
         rte_memcpy(buf, datagram->data, len);
@@ -495,10 +498,40 @@ int dpip_close(int sockfd) {
     if (entry->protocol == IPPROTO_UDP) {
         rte_ring_free(entry->udp.recv_ring);
         rte_ring_free(entry->udp.send_ring);
+
+        del_socket_entry(entry);
+        rte_free(entry);
+        return 0;
+    } 
+    
+    if (entry->protocol == IPPROTO_TCP) {
+        pthread_mutex_lock(&entry->mutex);
+        if (entry->tcp.status == DPIP_TCP_ESTABLISHED) {
+            entry->tcp.status = DPIP_TCP_FIN_WAIT_1;
+        } else if (entry->tcp.status == DPIP_TCP_CLOSE_WAIT) {
+            entry->tcp.status = DPIP_TCP_LAST_ACK;
+        } else if (entry->tcp.status == DPIP_TCP_LISTEN) {
+            // 释放半连接队列
+            struct socket_entry* syn_entry = entry->tcp.syn_queue;
+            while (syn_entry) {
+                struct socket_entry* next = syn_entry->next;
+                rte_free(syn_entry);
+                syn_entry = next;
+            }
+            struct socket_entry* accept_entry = entry->tcp.accept_queue;
+            while (accept_entry) {
+                struct socket_entry* next = accept_entry->next;
+                rte_free(accept_entry);
+                accept_entry = next;
+            }
+            pthread_mutex_unlock(&entry->mutex);
+            return 0;
+        }
+        pthread_mutex_unlock(&entry->mutex);
+        pkt_process_tcp_send_fin(entry);
+        return 0;
     }
-    del_socket_entry(entry);
-    rte_free(entry);
-    return 0;
+    return -1;
 }
 
 int dpip_listen(int sockfd
@@ -557,17 +590,19 @@ int dpip_accept(int sockfd
         return -1;
     }
     add_socket_entry(accept_sock_entry);
-    struct sockaddr_in* in_addr = (struct sockaddr_in*)addr;
-    in_addr->sin_family = AF_INET;
-    in_addr->sin_addr.s_addr = accept_sock_entry->tcp.remote_ip;
-    in_addr->sin_port = accept_sock_entry->tcp.remote_port;
+    if (addr) {
+        struct sockaddr_in* in_addr = (struct sockaddr_in*)addr;
+        in_addr->sin_family = AF_INET;
+        in_addr->sin_addr.s_addr = accept_sock_entry->tcp.remote_ip;
+        in_addr->sin_port = accept_sock_entry->tcp.remote_port;
+    };
     return accept_sock_entry->fd;
 }
 
-int dpip_recv(int sockfd
-            , void* buf
-            , size_t len
-            , __attribute__((unused)) int flags) {
+ssize_t dpip_recv(int sockfd
+                , void* buf
+                , size_t len
+                , __attribute__((unused)) int flags) {
     struct socket_entry* entry = get_socket_entry_by_fd(sockfd);
     if (!entry) {
         LOGGER_WARN("socket entry not found");
@@ -605,10 +640,10 @@ int dpip_recv(int sockfd
     return len;
 }
 
-int dpip_send(int sockfd
-            , const void* buf
-            , size_t len
-            , __attribute__((unused)) int flags) {
+ssize_t dpip_send(int sockfd
+                , const void* buf
+                , size_t len
+                , __attribute__((unused)) int flags) {
     struct socket_entry* entry = get_socket_entry_by_fd(sockfd);
     if (!entry) {
         LOGGER_WARN("socket entry not found");

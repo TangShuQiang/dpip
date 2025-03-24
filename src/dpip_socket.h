@@ -160,19 +160,19 @@ int dpip_bind(int sockfd
             , const struct sockaddr* addr
             , __attribute__((unused)) socklen_t addrlen);
 
-int dpip_sendto(int sockfd
-                , const void* buf
-                , size_t len
-                , __attribute__((unused)) int flags
-                , const struct sockaddr* dest_addr
-                , __attribute__((unused)) socklen_t addrlen);
+ssize_t dpip_sendto(int sockfd
+                    , const void* buf
+                    , size_t len
+                    , __attribute__((unused)) int flags
+                    , const struct sockaddr* dest_addr
+                    , __attribute__((unused)) socklen_t addrlen);
 
-int dpip_recvfrom(int sockfd
-                , void* buf
-                , size_t len
-                , __attribute__((unused)) int flags
-                , struct sockaddr* src_addr
-                , __attribute__((unused)) socklen_t* addrlen);
+ssize_t dpip_recvfrom(int sockfd
+                    , void* buf
+                    , size_t len
+                    , __attribute__((unused)) int flags
+                    , struct sockaddr* src_addr
+                    , __attribute__((unused)) socklen_t* addrlen);
 
 int dpip_close(int sockfd);
 
@@ -183,14 +183,14 @@ int dpip_accept(int sockfd
                 , struct sockaddr* addr
                 , __attribute__((unused)) socklen_t* addrlen);
 
-int dpip_recv(int sockfd
-            , void* buf
-            , size_t len
-            , __attribute__((unused)) int flags);
+ssize_t dpip_recv(int sockfd
+                , void* buf
+                , size_t len
+                , __attribute__((unused)) int flags);
 
-int dpip_send(int sockfd
-            , const void* buf
-            , size_t len
-            , __attribute__((unused)) int flags);
+ssize_t dpip_send(int sockfd
+                , const void* buf
+                , size_t len
+                , __attribute__((unused)) int flags);
 
 #endif
