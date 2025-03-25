@@ -335,37 +335,6 @@ void pkt_process_tcp_on_established(struct socket_entry* tcp_sock_entry
     if (tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG) {
         pthread_cond_signal(&tcp_sock_entry->notempty);
     }
-#if 0
-    if (segment->length == 0) {
-        return;
-    }
-    // echo
-    struct tcp_segment* echo_segment = (struct tcp_segment*) rte_malloc("tcp_segment", sizeof(struct tcp_segment), 0);
-    if (!echo_segment) {
-        LOGGER_WARN("rte_malloc tcp_segment error");
-        return;
-    }
-    echo_segment->src_ip = ip_hdr->dst_addr;
-    echo_segment->dst_ip = ip_hdr->src_addr;
-    echo_segment->src_port = tcp_hdr->dst_port;
-    echo_segment->dst_port = tcp_hdr->src_port;
-    echo_segment->seq = tcp_sock_entry->tcp.seq;
-    echo_segment->ack = tcp_sock_entry->tcp.ack;
-    echo_segment->data_off = 0x50;
-    echo_segment->flags = RTE_TCP_PSH_FLAG | RTE_TCP_ACK_FLAG;
-    echo_segment->rx_win = tcp_sock_entry->tcp.rx_win;
-    echo_segment->tcp_urp = 0;
-    echo_segment->data = (uint8_t*) rte_malloc("tcp_data", segment->length, 0);
-    if (!echo_segment->data) {
-        LOGGER_WARN("rte_malloc tcp_data error");
-        rte_free(echo_segment);
-        return;
-    }
-    rte_memcpy(echo_segment->data, segment->data, segment->length);
-    echo_segment->length = segment->length;
-
-    rte_ring_mp_enqueue(tcp_sock_entry->tcp.send_ring, echo_segment);
-#endif
 }
 
 void pkt_process_tcp_on_listen(struct socket_entry* listen_sock_entry
@@ -621,7 +590,7 @@ void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_
                                                                                 , ip_hdr->src_addr
                                                                                 , tcp_hdr->src_port);
     if (!tcp_sock_entry) {
-        LOGGER_WARN("tcp socket not found");
+        // LOGGER_WARN("tcp socket not found");
         return;
     }
     switch (tcp_sock_entry->tcp.status) {
@@ -677,6 +646,9 @@ void pkt_process_ipv4(struct dpip_nic* nic, uint8_t* pkt_ptr) {
 
     // 判断目的IP地址是否是本地IP地址
     if (ip_hdr->dst_addr == nic->local_ip) {
+
+        // 更新arp表
+        update_arp_entry(&nic->arp_table, ip_hdr->src_addr, eth_hdr->s_addr.addr_bytes);
 
         switch (ip_hdr->next_proto_id) {
             // 判断是否为ICMP数据包
@@ -779,8 +751,9 @@ void process_socket_entries(struct dpip_nic* nic) {
     for (struct socket_entry* entry = sock_table->tcp_entry_head; entry; entry = entry->next) {
         struct tcp_segment* segment = NULL;
 
-        if (entry->tcp.status != DPIP_TCP_LISTEN) {
-            
+        pthread_mutex_lock(&entry->mutex);
+        // 监听状态的socket实体 或者 刚创建的socket实体
+        if (!(entry->tcp.status == DPIP_TCP_LISTEN || entry->tcp.status == DPIP_TCP_CLOSED)) {
             if (rte_ring_mc_dequeue(entry->tcp.send_ring, (void**)&segment) == 0) {
                 pthread_cond_signal(&entry->notfull);
 
@@ -805,10 +778,10 @@ void process_socket_entries(struct dpip_nic* nic) {
                     rte_free(segment);
                 }
             }
+            pthread_mutex_unlock(&entry->mutex);
             continue;
         }
         // 处理监听状态的socket实体
-        pthread_mutex_lock(&entry->mutex);
         for (struct socket_entry* sys_sock_entry = entry->tcp.syn_queue; sys_sock_entry; sys_sock_entry = sys_sock_entry->next) {
             if (rte_ring_mc_dequeue(sys_sock_entry->tcp.send_ring, (void**)&segment) == 0) {
                 pthread_cond_signal(&sys_sock_entry->notfull);

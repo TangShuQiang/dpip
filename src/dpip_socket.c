@@ -357,6 +357,7 @@ int dpip_socket(int domain
         tcp->local_port = 0;
         tcp->remote_ip = 0;
         tcp->remote_port = 0;
+        tcp->status = DPIP_TCP_CLOSED;
         pthread_cond_init(&tcp->accept_queue_not_empty, NULL);
         tcp->syn_queue = NULL;
         tcp->accept_queue = NULL;

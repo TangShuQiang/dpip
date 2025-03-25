@@ -90,6 +90,9 @@ int dpip_nic_init(struct dpip_nic* nic, uint16_t port_id, uint32_t local_ip, uin
         return -1;
     }
 
+    // 开启混杂模式
+    rte_eth_promiscuous_enable(nic->port_id);
+
     // 创建接收和发送数据包环形队列
     char ring_name[32];
     static int ring_id = 0;
