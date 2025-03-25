@@ -4,10 +4,44 @@
 
 #include <rte_malloc.h>
 #include <rte_tcp.h>
+#include <rte_jhash.h>
 
 #include <arpa/inet.h>
 
 static struct socket_table socket_table = { 0 };            // socket表
+
+pthread_once_t once = PTHREAD_ONCE_INIT;
+
+// 初始化socket表
+static void init_socket_table(void) {
+    struct rte_hash_parameters socket_hash_params = {
+        .name = "socket_hash_table",
+        .entries = MAX_FD_COUNT,
+        .key_len = sizeof(struct socket_key),
+        .hash_func = rte_jhash,
+        .hash_func_init_val = 0,
+        .socket_id = rte_socket_id(),
+    };
+    socket_table.socket_hash_table = rte_hash_create(&socket_hash_params);
+    if (!socket_table.socket_hash_table) {
+        LOGGER_ERROR("rte_hash_create socket_hash_table error");
+        rte_exit(EXIT_FAILURE, "rte_hash_create error\n");
+    }
+    struct rte_hash_parameters fd_hash_params = {
+        .name = "fd_hash_table",
+        .entries = MAX_FD_COUNT,
+        .key_len = sizeof(int32_t),
+        .hash_func = rte_jhash,
+        .hash_func_init_val = 0,
+        .socket_id = rte_socket_id(),
+    };
+    socket_table.fd_hash_table = rte_hash_create(&fd_hash_params);
+    if (!socket_table.fd_hash_table) {
+        LOGGER_ERROR("rte_hash_create fd_hash_table error");
+        rte_exit(EXIT_FAILURE, "rte_hash_create error\n");
+    }
+    pthread_rwlock_init(&socket_table.rwlock, NULL);
+}
 
 // 查找半连接
 struct socket_entry* get_syn_by_ip_port(struct socket_entry* listen_sock_entry
@@ -143,149 +177,198 @@ struct socket_entry* get_accept_by_ip_port(struct socket_entry* listen_sock_entr
 
 // 通过fd获取socket实体 
 struct socket_entry* get_socket_entry_by_fd(int32_t fd) {
-    pthread_rwlock_rdlock(&socket_table.rwlock);
-    struct socket_entry* entry = socket_table.udp_entry_head;
-    while (entry) {
-        if (entry->fd == fd) {
-            pthread_rwlock_unlock(&socket_table.rwlock);
-            return entry;
-        }
-        entry = entry->next;
+    struct socket_table* table = get_socket_table();
+    if (!table) {
+        LOGGER_ERROR("socket_table is NULL");
+        return NULL;
     }
-    entry = socket_table.tcp_entry_head;
-    while (entry) {
-        if (entry->fd == fd) {
-            pthread_rwlock_unlock(&socket_table.rwlock);
-            return entry;
-        }
-        entry = entry->next;
-    }
-    pthread_rwlock_unlock(&socket_table.rwlock);
-    return NULL;
+    struct socket_entry* entry = NULL;
+    // rte_smp_rmb();  // 读内存屏障
+    pthread_rwlock_rdlock(&table->rwlock);
+    rte_hash_lookup_data(table->fd_hash_table, &fd, (void**)&entry);
+    pthread_rwlock_unlock(&table->rwlock);
+    return entry;
 }
 
 // 通过协议、IP地址和端口号获取socket实体
 struct socket_entry* get_socket_entry_by_ip_port_protocol(uint8_t protocol
                                                         , uint32_t local_ip
                                                         , uint16_t local_port
-                                                        , __attribute__((unused)) uint32_t remote_ip
-                                                        , __attribute__((unused)) uint16_t remote_port) {
-    pthread_rwlock_rdlock(&socket_table.rwlock);
-    if (protocol == IPPROTO_UDP) {
-        struct socket_entry* entry = socket_table.udp_entry_head;
-        while (entry) {
-            if (entry->udp.local_ip == local_ip
-                && entry->udp.local_port == local_port) {
-                pthread_rwlock_unlock(&socket_table.rwlock);
-                return entry;
-            }
-            entry = entry->next;
-        }
-    } else if (protocol == IPPROTO_TCP) {
-        // ESTABLISHED、 SYN_SENT、SYN_RECEIVED、FIN_WAIT_1、FIN_WAIT_2、CLOSING、CLOSED、LAST_ACK、TIME_WAIT
-        struct socket_entry* entry = socket_table.tcp_entry_head;
-        while (entry) {
-            if (entry->tcp.local_ip == local_ip
-                && entry->tcp.local_port == local_port
-                && entry->tcp.remote_ip == remote_ip
-                && entry->tcp.remote_port == remote_port) {
-                pthread_rwlock_unlock(&socket_table.rwlock);
-                return entry;
-            }
-            entry = entry->next;
-        }
-        // LISTEN
-        entry = socket_table.tcp_entry_head;
-        while (entry) {
-            if (entry->tcp.local_ip == local_ip
-                && entry->tcp.local_port == local_port
-                && entry->tcp.status == DPIP_TCP_LISTEN) {
-                pthread_rwlock_unlock(&socket_table.rwlock);
-                return entry;
-            }
-            entry = entry->next;
-        }
+                                                        , uint32_t remote_ip
+                                                        , uint16_t remote_port) {
+    struct socket_table* table = get_socket_table();
+    if (!table) {
+        LOGGER_ERROR("socket_table is NULL");
+        return NULL;
     }
-    pthread_rwlock_unlock(&socket_table.rwlock);
+    struct socket_key key;      // 内存对齐，sizeof(struct socket_key) = 16
+    memset(&key, 0, sizeof(struct socket_key));
+    key.protocol = protocol;
+    key.local_ip = local_ip;
+    key.local_port = local_port;
+    key.remote_ip = remote_ip;
+    key.remote_port = remote_port;
+    struct socket_entry* entry = NULL;
+    if (protocol == IPPROTO_UDP) {
+        key.remote_ip = 0;
+        key.remote_port = 0;
+        pthread_rwlock_rdlock(&table->rwlock);
+        rte_hash_lookup_data(table->socket_hash_table, &key, (void**)&entry);
+        pthread_rwlock_unlock(&table->rwlock);
+        return entry;
+    } else if (protocol == IPPROTO_TCP) {
+        pthread_rwlock_rdlock(&table->rwlock);
+        rte_hash_lookup_data(table->socket_hash_table, &key, (void**)&entry);
+        pthread_rwlock_unlock(&table->rwlock);
+        if (entry) {
+            return entry;
+        }
+        key.remote_ip = 0;
+        key.remote_port = 0;
+        pthread_rwlock_rdlock(&table->rwlock);
+        rte_hash_lookup_data(table->socket_hash_table, &key, (void**)&entry);
+        pthread_rwlock_unlock(&table->rwlock);
+        if (entry && entry->tcp.status == DPIP_TCP_LISTEN) {
+            return entry;
+        }
+        return NULL;
+    }
     return NULL;
 }
 
 // 获取socket表
 struct socket_table* get_socket_table(void) {
+    if (pthread_once(&once, init_socket_table) != 0) {
+        LOGGER_ERROR("pthread_once error");
+        return NULL;
+    }
     return &socket_table;
 }
 
 // 添加socket实体
 void add_socket_entry(struct socket_entry* entry) {
-    pthread_rwlock_wrlock(&socket_table.rwlock);
-    if (entry->protocol == IPPROTO_UDP) {
-        entry->next = socket_table.udp_entry_head;
-        if (socket_table.udp_entry_head) {
-            socket_table.udp_entry_head->prev = entry;
-        }
-        socket_table.udp_entry_head = entry;
-    } else if (entry->protocol == IPPROTO_TCP) {
-        entry->next = socket_table.tcp_entry_head;
-        if (socket_table.tcp_entry_head) {
-            socket_table.tcp_entry_head->prev = entry;
-        }
-        socket_table.tcp_entry_head = entry;
+    struct socket_table* table = get_socket_table();
+    if (!table) {
+        LOGGER_ERROR("socket_table is NULL");
+        return;
     }
-    pthread_rwlock_unlock(&socket_table.rwlock);
+    pthread_rwlock_wrlock(&table->rwlock);
+    int32_t fd_key = entry->fd;
+    struct socket_key socket_key;
+    memset(&socket_key, 0, sizeof(struct socket_key));
+    if (entry->protocol == IPPROTO_UDP) {
+        socket_key.protocol = entry->protocol;
+        socket_key.local_ip = entry->udp.local_ip;
+        socket_key.local_port = entry->udp.local_port;
+        socket_key.remote_ip = 0;
+        socket_key.remote_port = 0;
+    } else if (entry->protocol == IPPROTO_TCP) {
+        socket_key.protocol = entry->protocol;
+        socket_key.local_ip = entry->tcp.local_ip;
+        socket_key.local_port = entry->tcp.local_port;
+        socket_key.remote_ip = entry->tcp.remote_ip;
+        socket_key.remote_port = entry->tcp.remote_port;
+    }
+    rte_hash_add_key_data(table->fd_hash_table, &fd_key, entry);
+    rte_hash_add_key_data(table->socket_hash_table, &socket_key, entry);
+    pthread_rwlock_unlock(&table->rwlock);
+}
+
+void add_socket_entry_fdkey(struct socket_entry* entry) {
+    struct socket_table* table = get_socket_table();
+    if (!table) {
+        LOGGER_ERROR("socket_table is NULL");
+        return;
+    }
+    pthread_rwlock_wrlock(&table->rwlock);
+    int32_t key = entry->fd;
+    rte_hash_add_key_data(table->fd_hash_table, &key, entry);
+    pthread_rwlock_unlock(&table->rwlock);
+}
+
+void add_socket_entry_socketkey(struct socket_entry* entry) {
+    struct socket_table* table = get_socket_table();
+    if (!table) {
+        LOGGER_ERROR("socket_table is NULL");
+        return;
+    }
+    pthread_rwlock_wrlock(&table->rwlock);
+    struct socket_key key;
+    memset(&key, 0, sizeof(struct socket_key));
+    if (entry->protocol == IPPROTO_UDP) {
+        key.protocol = entry->protocol;
+        key.local_ip = entry->udp.local_ip;
+        key.local_port = entry->udp.local_port;
+        key.remote_ip = 0;
+        key.remote_port = 0;
+    } else if (entry->protocol == IPPROTO_TCP) {
+        key.protocol = entry->protocol;
+        key.local_ip = entry->tcp.local_ip;
+        key.local_port = entry->tcp.local_port;
+        key.remote_ip = entry->tcp.remote_ip;
+        key.remote_port = entry->tcp.remote_port;
+    }
+    rte_hash_add_key_data(table->socket_hash_table, &key, entry);
+    pthread_rwlock_unlock(&table->rwlock);
 }
 
 // 删除socket实体
 void del_socket_entry(struct socket_entry* entry) {
-    pthread_rwlock_wrlock(&socket_table.rwlock);
-    if (entry->protocol == IPPROTO_UDP) {
-        if (entry->prev) {
-            entry->prev->next = entry->next;
-        } else {
-            socket_table.udp_entry_head = entry->next;
-        }
-        if (entry->next) {
-            entry->next->prev = entry->prev;
-        }
-    } else if (entry->protocol == IPPROTO_TCP) {
-        if (entry->prev) {
-            entry->prev->next = entry->next;
-        } else {
-            socket_table.tcp_entry_head = entry->next;
-        }
-        if (entry->next) {
-            entry->next->prev = entry->prev;
-        }
+    struct socket_table* table = get_socket_table();
+    if (!table) {
+        LOGGER_ERROR("socket_table is NULL");
+        return;
     }
-    // 回收文件描述符
-    int fd = entry->fd;
-    socket_table.fd_bitmap[fd / 8] &= ~(1 << (fd % 8));
+    int32_t fd_key = entry->fd;
+    struct socket_key socket_key;
+    if (entry->protocol == IPPROTO_UDP) {
+        socket_key.protocol = entry->protocol;
+        socket_key.local_ip = entry->udp.local_ip;
+        socket_key.local_port = entry->udp.local_port;
+        socket_key.remote_ip = 0;
+        socket_key.remote_port = 0;
+    } else if (entry->protocol == IPPROTO_TCP) {
+        socket_key.protocol = entry->protocol;
+        socket_key.local_ip = entry->tcp.local_ip;
+        socket_key.local_port = entry->tcp.local_port;
+        socket_key.remote_ip = entry->tcp.remote_ip;
+        socket_key.remote_port = entry->tcp.remote_port;
+    }
+    pthread_rwlock_wrlock(&table->rwlock);
+    rte_hash_del_key(table->fd_hash_table, &fd_key);
+    rte_hash_del_key(table->socket_hash_table, &socket_key);
 
-    pthread_rwlock_unlock(&socket_table.rwlock);
+    // 回收文件描述符
+    table->fd_bitmap[fd_key / 8] &= ~(1 << (fd_key % 8));
+
+    pthread_rwlock_unlock(&table->rwlock);
 }
 
 // 从位图中获取一个空闲的文件描述符
 static int get_free_fd_from_bitmap(void) {
-    pthread_rwlock_wrlock(&socket_table.rwlock);
+    struct socket_table* table = get_socket_table();
+    pthread_rwlock_wrlock(&table->rwlock);
     for (int i = 0; i < MAX_FD_COUNT / 8; ++i) {
-        if (socket_table.fd_bitmap[i] != 0xFF) {
+        if (table->fd_bitmap[i] != 0xFF) {
             for (int j = 0; j < 8; ++j) {
-                if (!(socket_table.fd_bitmap[i] & (1 << j))) {
-                    socket_table.fd_bitmap[i] |= (1 << j);
-                    pthread_rwlock_unlock(&socket_table.rwlock);
+                if (!(table->fd_bitmap[i] & (1 << j))) {
+                    table->fd_bitmap[i] |= (1 << j);
+                    pthread_rwlock_unlock(&table->rwlock);
                     return i * 8 + j;
                 }
             }
         }
     }
-    pthread_rwlock_unlock(&socket_table.rwlock);
+    pthread_rwlock_unlock(&table->rwlock);
     return -1;
 }
 
 // 释放文件描述符
 static void free_fd_to_bitmap(int fd) {
-    pthread_rwlock_wrlock(&socket_table.rwlock);
+    struct socket_table* table = get_socket_table();
+    pthread_rwlock_wrlock(&table->rwlock);
     socket_table.fd_bitmap[fd / 8] &= ~(1 << (fd % 8));
-    pthread_rwlock_unlock(&socket_table.rwlock);
+    pthread_rwlock_unlock(&table->rwlock);
 }
 
 int dpip_socket(int domain
@@ -337,7 +420,7 @@ int dpip_socket(int domain
             free_fd_to_bitmap(fd);
             return -1;
         }
-        add_socket_entry(entry);
+        add_socket_entry_fdkey(entry);
     } else if (type == SOCK_STREAM) {
         struct socket_entry* entry = (struct socket_entry*)rte_malloc("socket_entry", sizeof(struct socket_entry), 0);
         if (!entry) {
@@ -365,27 +448,7 @@ int dpip_socket(int domain
         tcp->backlog = 0;
         tcp->current_syn_queue_length = 0;
         tcp->current_accept_queue_length = 0;
-        // 给ring命名
-        // char ring_name[32];
-        // static int tcp_ring_id = 0;
-        // snprintf(ring_name, sizeof(ring_name), "tcp_socket_recv_ring_id_%d", tcp_ring_id);
-        // tcp->recv_ring = rte_ring_create(ring_name, 2, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
-        // if (!tcp->recv_ring) {
-        //     LOGGER_ERROR("rte_ring_create %s error", ring_name);
-        //     rte_free(entry);
-        //     free_fd_to_bitmap(fd);
-        //     return -1;
-        // }
-        // snprintf(ring_name, sizeof(ring_name), "tcp_socket_send_ring_id_%d", tcp_ring_id++);
-        // tcp->send_ring = rte_ring_create(ring_name, 2, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
-        // if (!tcp->send_ring) {
-        //     LOGGER_ERROR("rte_ring_create %s error", ring_name);
-        //     rte_ring_free(tcp->recv_ring);
-        //     rte_free(entry);
-        //     free_fd_to_bitmap(fd);
-        //     return -1;
-        // }
-        add_socket_entry(entry);
+        add_socket_entry_fdkey(entry);
     }
     return fd;
 }
@@ -398,6 +461,7 @@ int dpip_bind(int sockfd
         LOGGER_WARN("socket entry not found");
         return -1;
     }
+    pthread_mutex_lock(&entry->mutex);
     if (entry->protocol == IPPROTO_UDP) {
         const struct sockaddr_in* in_addr = (const struct sockaddr_in*)addr;
         entry->udp.local_ip = in_addr->sin_addr.s_addr;
@@ -407,6 +471,8 @@ int dpip_bind(int sockfd
         entry->tcp.local_ip = in_addr->sin_addr.s_addr;
         entry->tcp.local_port = in_addr->sin_port;
     }
+    pthread_mutex_unlock(&entry->mutex);
+    add_socket_entry_socketkey(entry);
     return 0;
 }
 

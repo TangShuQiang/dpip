@@ -4,6 +4,7 @@
 #include "dpip_config.h"
 
 #include <rte_ether.h>
+#include <rte_hash.h>
 
 #include <sys/socket.h>
 
@@ -122,11 +123,23 @@ struct socket_entry* get_accept_by_ip_port(struct socket_entry* listen_sock_entr
                                         , uint32_t remote_ip
                                         , uint16_t remote_port);
 
+struct socket_key
+{
+    uint32_t local_ip;
+    uint32_t remote_ip;
+    uint16_t local_port;
+    uint16_t remote_port;
+    uint8_t protocol;
+};
+
 // socket表
 struct socket_table
 {
-    struct socket_entry* udp_entry_head;
-    struct socket_entry* tcp_entry_head;
+    // struct socket_entry* udp_entry_head;
+    // struct socket_entry* tcp_entry_head;
+
+    struct rte_hash* socket_hash_table;
+    struct rte_hash* fd_hash_table;
 
     uint8_t fd_bitmap[MAX_FD_COUNT / 8];
 
@@ -140,14 +153,18 @@ struct socket_entry* get_socket_entry_by_fd(int32_t fd);
 struct socket_entry* get_socket_entry_by_ip_port_protocol(uint8_t protocol
                                                         , uint32_t local_ip
                                                         , uint16_t local_port
-                                                        , __attribute__((unused)) uint32_t remote_ip
-                                                        , __attribute__((unused)) uint16_t remote_port);
+                                                        , uint32_t remote_ip
+                                                        , uint16_t remote_port);
 
 // 获取socket表
 struct socket_table* get_socket_table(void);
 
 // 添加socket实体
 void add_socket_entry(struct socket_entry* entry);
+
+void add_socket_entry_fdkey(struct socket_entry* entry);
+
+void add_socket_entry_socketkey(struct socket_entry* entry);
 
 // 删除socket实体
 void del_socket_entry(struct socket_entry* entry);

@@ -102,9 +102,8 @@ static void run_tcp_server(void) {
             LOGGER_ERROR("dpip_accept error");
             return;
         }
-        LOGGER_DEBUG("dpip_accept success, fd=%d", fd);
+        LOGGER_DEBUG("dpip_accept success, fd=%d, %s:%d", fd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
         while (1) {
-            LOGGER_DEBUG("accept %s:%d", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
             char buf[1024] = {0};
             int len = dpip_recv(fd, buf, sizeof(buf), 0);

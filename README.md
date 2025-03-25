@@ -226,3 +226,5 @@ shell> cat /proc/sys/vm/nr_hugepages
 2. arp_table 和 socket_table使用读写锁进行并发访问，在查询/更新时，找到数据就立刻返回，没有对锁进行释放，导致之后的线程再对其操作时得不到锁，导致死锁。
 
 3. 创建环形队列函数struct rte_ring* rte_ring_create(const char *name, unsigned count, int socket_id, unsigned flags)的第一个参数环形队列的名字name必须全局唯一，否则会创建失败，出现**RING: Cannot reserve memory**错误
+
+4. 用ret_hash存储socket_entry时，key是ip-port-protocol五元组(结构体struct socket_key)，在栈上创建该结构体对象key，会因为内存对齐分配16字节（实际13字节）。因为没有执行memset操作，导致在运行时，另一个线程使用相同的五元组，也找不到对应的value。一开始因为是多核直接没有同步数据，使用rte_smp_wmb() 和 rte_smp_rmb()进行内存屏障同步，依旧不行。最后才想到是内存对齐问题，key存在脏数据。
