@@ -105,28 +105,41 @@ struct rte_mbuf* get_udp_pkt(struct rte_mempool* mbuf_pool
 struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool  
                             , uint8_t* dst_mac
                             , uint8_t* src_mac
-                            , struct tcp_segment* segment);
+                            , uint32_t dst_ip
+                            , uint32_t src_ip
+                            , uint16_t dst_port
+                            , uint16_t src_port
+                            , uint32_t seq
+                            , uint32_t ack
+                            , uint8_t flags
+                            , uint16_t rx_win
+                            , uint8_t* data
+                            , uint16_t length);
 
 /*
     发送ACK确认数据包
 */
-void pkt_process_tcp_send_ack(struct socket_entry* tcp_sock_entry);
+void pkt_process_tcp_send_ack(struct dpip_nic* nic
+                            , struct socket_entry* tcp_sock_entry);
 
 /*
     发送FIN数据包
 */
-void pkt_process_tcp_send_fin(struct socket_entry* tcp_sock_entry);
+void pkt_process_tcp_send_fin(struct dpip_nic* nic
+                            , struct socket_entry* tcp_sock_entry);
 
 /*
     处理 ESTABLISHED 状态下（DPIP_TCP_ESTABLISHED） 的TCP数据包
 */
-void pkt_process_tcp_on_established(struct socket_entry* tcp_sock_entry
+void pkt_process_tcp_on_established(struct dpip_nic* nic
+                                    , struct socket_entry* tcp_sock_entry
                                     , uint8_t* pkt_ptr);
 
 /*
     处理 监听状态下（DPIP_TCP_LISTEN） 的TCP数据包
 */
-void pkt_process_tcp_on_listen(struct socket_entry* listen_sock_entry
+void pkt_process_tcp_on_listen(struct dpip_nic* nic
+                                , struct socket_entry* listen_sock_entry
                                 , uint8_t* pkt_ptr);
 
 /*
@@ -138,7 +151,8 @@ void pkt_process_tcp_on_last_ack(struct socket_entry* tcp_sock_entry
 /*
     处理 CLOSE_WAIT 状态下（DPIP_TCP_CLOSE_WAIT） 的TCP数据包
 */
-void pkt_process_tcp_on_close_wait(struct socket_entry* tcp_sock_entry
+void pkt_process_tcp_on_close_wait(struct dpip_nic* nic
+                                , struct socket_entry* tcp_sock_entry
                                 , uint8_t* pkt_ptr);
 
 /*

@@ -14,8 +14,11 @@ pthread_once_t once = PTHREAD_ONCE_INIT;
 
 // 初始化socket表
 static void init_socket_table(void) {
+    static uint32_t count = 0;
+    char name[32];
+    sprintf(name, "socket_table_%d", count);
     struct rte_hash_parameters socket_hash_params = {
-        .name = "socket_hash_table",
+        .name = name,
         .entries = MAX_FD_COUNT,
         .key_len = sizeof(struct socket_key),
         .hash_func = rte_jhash,
@@ -24,11 +27,12 @@ static void init_socket_table(void) {
     };
     socket_table.socket_hash_table = rte_hash_create(&socket_hash_params);
     if (!socket_table.socket_hash_table) {
-        LOGGER_ERROR("rte_hash_create socket_hash_table error");
+        LOGGER_ERROR("rte_hash_create %s error", name);
         rte_exit(EXIT_FAILURE, "rte_hash_create error\n");
     }
+    sprintf(name, "fd_bitmap_%d", count++);
     struct rte_hash_parameters fd_hash_params = {
-        .name = "fd_hash_table",
+        .name = name,
         .entries = MAX_FD_COUNT,
         .key_len = sizeof(int32_t),
         .hash_func = rte_jhash,
@@ -37,7 +41,7 @@ static void init_socket_table(void) {
     };
     socket_table.fd_hash_table = rte_hash_create(&fd_hash_params);
     if (!socket_table.fd_hash_table) {
-        LOGGER_ERROR("rte_hash_create fd_hash_table error");
+        LOGGER_ERROR("rte_hash_create %s error", name);
         rte_exit(EXIT_FAILURE, "rte_hash_create error\n");
     }
     pthread_rwlock_init(&socket_table.rwlock, NULL);
@@ -99,33 +103,54 @@ struct socket_entry* get_syn_by_ip_port(struct socket_entry* listen_sock_entry
     new_syn_entry->tcp.remote_ip = remote_ip;
     new_syn_entry->tcp.remote_port = remote_port;
     new_syn_entry->tcp.status = DPIP_TCP_SYN_RECEIVED;
-    new_syn_entry->tcp.seq = TCP_MAX_SEQ;
 
     pthread_cond_init(&new_syn_entry->notfull, NULL);
     pthread_cond_init(&new_syn_entry->notempty, NULL);
     pthread_mutex_init(&new_syn_entry->mutex, NULL);
 
-    char ring_name[32] = { 0 };
-    static uint32_t ring_id = 0;
-    snprintf(ring_name, 32, "tcp_sys_recv_ring_%d", ring_id);
-    new_syn_entry->tcp.recv_ring = rte_ring_create(ring_name, TCP_RECV_RING_SIZE, 0, RING_F_SC_DEQ | RING_F_SP_ENQ);
-    if (!new_syn_entry->tcp.recv_ring) {
-        LOGGER_WARN("rte_ring_create tcp_sys_recv_ring error");
+    new_syn_entry->tcp.send_next = TCP_MAX_SEQ;
+
+    new_syn_entry->tcp.recv_info.buf = (uint8_t*) rte_malloc("tcp_recv_buf", DPIP_TCP_RECV_BUF_SIZE, 0);
+    if (!new_syn_entry->tcp.recv_info.buf) {
+        LOGGER_WARN("rte_malloc tcp_recv_buf error");
         rte_free(new_syn_entry);
 
         pthread_mutex_unlock(&listen_sock_entry->mutex);
         return NULL;
     }
-    snprintf(ring_name, 32, "tcp_sys_send_ring_%d", ring_id++);
-    new_syn_entry->tcp.send_ring = rte_ring_create(ring_name, TCP_SEND_RING_SIZE, 0, RING_F_SC_DEQ | RING_F_SP_ENQ);
-    if (!new_syn_entry->tcp.send_ring) {
-        LOGGER_WARN("rte_ring_create tcp_sys_send_ring error");
-        rte_ring_free(new_syn_entry->tcp.recv_ring);
+    new_syn_entry->tcp.recv_info.capacity = DPIP_TCP_RECV_BUF_SIZE;
+
+    static uint32_t count = 0;
+    char name[32];
+    sprintf(name, "recv_hash_table_%d", count++);
+    struct rte_hash_parameters recv_hash_table_params = {
+        .name = name,
+        .entries = MAX_FD_COUNT,
+        .key_len = sizeof(uint32_t),
+        .hash_func = rte_jhash,
+        .hash_func_init_val = 0,
+        .socket_id = rte_socket_id(),
+    };
+    new_syn_entry->tcp.recv_info.recv_hash_table = rte_hash_create(&recv_hash_table_params);
+    if (!new_syn_entry->tcp.recv_info.recv_hash_table) {
+        LOGGER_WARN("rte_hash_create %s error", name);
+        rte_free(new_syn_entry->tcp.recv_info.buf);
         rte_free(new_syn_entry);
 
         pthread_mutex_unlock(&listen_sock_entry->mutex);
         return NULL;
     }
+
+    new_syn_entry->tcp.send_info.buf = (uint8_t*) rte_malloc("tcp_send_buf", DPIP_TCP_SEND_BUF_SIZE, 0);
+    if (!new_syn_entry->tcp.send_info.buf) {
+        LOGGER_WARN("rte_malloc tcp_send_buf error");
+        rte_free(new_syn_entry->tcp.recv_info.buf);
+        rte_free(new_syn_entry);
+
+        pthread_mutex_unlock(&listen_sock_entry->mutex);
+        return NULL;
+    }
+    new_syn_entry->tcp.send_info.capacity = DPIP_TCP_SEND_BUF_SIZE;
 
     new_syn_entry->next = listen_sock_entry->tcp.syn_queue;
     if (listen_sock_entry->tcp.syn_queue) {
@@ -487,8 +512,10 @@ ssize_t dpip_sendto(int sockfd
         LOGGER_WARN("socket entry not found");
         return -1;
     }
+    pthread_mutex_lock(&entry->mutex);
     if (entry->protocol != IPPROTO_UDP) {
         LOGGER_WARN("dpip_sendto only support UDP protocol");
+        pthread_mutex_unlock(&entry->mutex);
         return -1;
     }
     const struct sockaddr_in* in_addr = (const struct sockaddr_in*)dest_addr;
@@ -497,6 +524,7 @@ ssize_t dpip_sendto(int sockfd
     struct udp_datagram* datagram = (struct udp_datagram*)rte_malloc("udp_datagram", sizeof(struct udp_datagram), 0);
     if (!datagram) {
         LOGGER_WARN("rte_malloc udp_datagram error");
+        pthread_mutex_unlock(&entry->mutex);
         return -1;
     }
     datagram->src_ip = entry->udp.local_ip;
@@ -508,10 +536,10 @@ ssize_t dpip_sendto(int sockfd
     if (!datagram->data) {
         LOGGER_WARN("rte_malloc udp_data error");
         rte_free(datagram);
+        pthread_mutex_unlock(&entry->mutex);
         return -1;
     }
     rte_memcpy(datagram->data, buf, len);
-    pthread_mutex_lock(&entry->mutex);
     while (rte_ring_mp_enqueue(entry->udp.send_ring, datagram) != 0) {
         pthread_cond_wait(&entry->notfull, &entry->mutex);
     }
@@ -531,12 +559,13 @@ ssize_t dpip_recvfrom(int sockfd
         return -1;
     }
 
+    pthread_mutex_lock(&entry->mutex);
     if (entry->protocol != IPPROTO_UDP) {
         LOGGER_WARN("dpip_recvfrom only support UDP protocol");
+        pthread_mutex_unlock(&entry->mutex);
         return -1;
     }
     struct udp_datagram* datagram = NULL;
-    pthread_mutex_lock(&entry->mutex);
     while (rte_ring_mc_dequeue(entry->udp.recv_ring, (void**)&datagram) != 0) {
         pthread_cond_wait(&entry->notempty, &entry->mutex);
     }
@@ -562,21 +591,23 @@ int dpip_close(int sockfd) {
         LOGGER_WARN("socket entry not found");
         return -1;
     }
+    pthread_mutex_lock(&entry->mutex);
     if (entry->protocol == IPPROTO_UDP) {
         rte_ring_free(entry->udp.recv_ring);
         rte_ring_free(entry->udp.send_ring);
 
         del_socket_entry(entry);
         rte_free(entry);
+        pthread_mutex_unlock(&entry->mutex);
         return 0;
     } 
     
     if (entry->protocol == IPPROTO_TCP) {
-        pthread_mutex_lock(&entry->mutex);
         if (entry->tcp.status == DPIP_TCP_ESTABLISHED) {
             entry->tcp.status = DPIP_TCP_FIN_WAIT_1;
         } else if (entry->tcp.status == DPIP_TCP_CLOSE_WAIT) {
             entry->tcp.status = DPIP_TCP_LAST_ACK;
+            entry->tcp.nead_send_fin = 1;
         } else if (entry->tcp.status == DPIP_TCP_LISTEN) {
             // 释放半连接队列
             struct socket_entry* syn_entry = entry->tcp.syn_queue;
@@ -591,13 +622,11 @@ int dpip_close(int sockfd) {
                 rte_free(accept_entry);
                 accept_entry = next;
             }
-            pthread_mutex_unlock(&entry->mutex);
-            return 0;
         }
         pthread_mutex_unlock(&entry->mutex);
-        pkt_process_tcp_send_fin(entry);
         return 0;
     }
+    pthread_mutex_unlock(&entry->mutex);
     return -1;
 }
 
@@ -612,11 +641,17 @@ int dpip_listen(int sockfd
         LOGGER_WARN("socket entry not found");
         return -1;
     }
+    pthread_mutex_lock(&entry->mutex);
     if (entry->protocol != IPPROTO_TCP) {
         LOGGER_WARN("dpip_listen only support TCP protocol");
+        pthread_mutex_unlock(&entry->mutex);
         return -1;
     }
-    pthread_mutex_lock(&entry->mutex);
+    if (entry->tcp.status != DPIP_TCP_CLOSED) {
+        LOGGER_WARN("socket status is not DPIP_TCP_CLOSED");
+        pthread_mutex_unlock(&entry->mutex);
+        return -1;
+    }
     entry->tcp.status = DPIP_TCP_LISTEN;
     entry->tcp.backlog = backlog;
     pthread_mutex_unlock(&entry->mutex);
@@ -631,11 +666,17 @@ int dpip_accept(int sockfd
         LOGGER_WARN("socket entry not found");
         return -1;
     }
+    pthread_mutex_lock(&listen_sock_entry->mutex);
     if (listen_sock_entry->protocol != IPPROTO_TCP) {
         LOGGER_WARN("dpip_accept only support TCP protocol");
+        pthread_mutex_unlock(&listen_sock_entry->mutex);
         return -1;
     }
-    pthread_mutex_lock(&listen_sock_entry->mutex);
+    if (listen_sock_entry->tcp.status != DPIP_TCP_LISTEN) {
+        LOGGER_WARN("socket status is not DPIP_TCP_LISTEN");
+        pthread_mutex_unlock(&listen_sock_entry->mutex);
+        return -1;
+    }
     struct socket_entry* accept_sock_entry = NULL;
     while (!accept_sock_entry) {
         if (listen_sock_entry->tcp.accept_queue) {
@@ -650,12 +691,15 @@ int dpip_accept(int sockfd
         }
     }
     pthread_mutex_unlock(&listen_sock_entry->mutex);
-    accept_sock_entry->fd = get_free_fd_from_bitmap();
-    if (accept_sock_entry->fd == -1) {
+    int fd = get_free_fd_from_bitmap();
+    if (fd == -1) {
         LOGGER_WARN("no free fd");
         rte_free(accept_sock_entry);
         return -1;
     }
+    pthread_mutex_lock(&accept_sock_entry->mutex);
+    accept_sock_entry->fd = fd;
+    pthread_mutex_unlock(&accept_sock_entry->mutex);
     add_socket_entry(accept_sock_entry);
     if (addr) {
         struct sockaddr_in* in_addr = (struct sockaddr_in*)addr;
@@ -675,35 +719,32 @@ ssize_t dpip_recv(int sockfd
         LOGGER_WARN("socket entry not found");
         return -1;
     }
+    pthread_mutex_lock(&entry->mutex);
     if (entry->protocol != IPPROTO_TCP) {
         LOGGER_WARN("dpip_recv only support TCP protocol");
+        pthread_mutex_unlock(&entry->mutex);
         return -1;
     }
-    struct tcp_segment* segment = NULL;
-    pthread_mutex_lock(&entry->mutex);
-    while (rte_ring_mc_dequeue(entry->tcp.recv_ring, (void**)&segment) != 0 && entry->tcp.status == DPIP_TCP_ESTABLISHED) {
+    if (entry->tcp.status != DPIP_TCP_ESTABLISHED) {
+        LOGGER_WARN("socket status is not DPIP_TCP_ESTABLISHED");
+        pthread_mutex_unlock(&entry->mutex);
+        return -1;
+    }
+    while (entry->tcp.recv_info.size == 0 && entry->tcp.status != DPIP_TCP_CLOSE_WAIT) {
         pthread_cond_wait(&entry->notempty, &entry->mutex);
     }
     // 如果连接已经关闭，直接返回0
-    if (entry->tcp.status != DPIP_TCP_ESTABLISHED) {
+    if (entry->tcp.status == DPIP_TCP_CLOSE_WAIT && entry->tcp.recv_info.size == 0) {
         pthread_mutex_unlock(&entry->mutex);
         return 0;
     }
-    pthread_mutex_unlock(&entry->mutex);
-    if (len > segment->length) {
-        len = segment->length;
-        rte_memcpy(buf, segment->data, len);
-        rte_free(segment->data);
-        rte_free(segment);
-    } else {
-        rte_memcpy(buf, segment->data, len);
-        // 移动数据
-        rte_memcpy(segment->data, (uint8_t*)segment->data + len, segment->length - len);
-        segment->length -= len;
-
-        pthread_cond_signal(&entry->notfull);
-        rte_ring_mp_enqueue(entry->tcp.recv_ring, segment);
+    len = (len > entry->tcp.recv_info.size) ? entry->tcp.recv_info.size : len;
+    for (size_t i = 0; i < len; ++i) {
+        ((uint8_t*)buf)[i] = entry->tcp.recv_info.buf[entry->tcp.recv_info.read_index];
+        entry->tcp.recv_info.read_index = (entry->tcp.recv_info.read_index + 1) % entry->tcp.recv_info.capacity;
     }
+    entry->tcp.recv_info.size -= len;
+    pthread_mutex_unlock(&entry->mutex);
     return len;
 }
 
@@ -716,37 +757,28 @@ ssize_t dpip_send(int sockfd
         LOGGER_WARN("socket entry not found");
         return -1;
     }
-    if (entry->protocol != IPPROTO_TCP) {
-        LOGGER_WARN("dpip_send only support TCP protocol");
-        return -1;
-    }
-    struct tcp_segment* segment = (struct tcp_segment*)rte_malloc("tcp_segment", sizeof(struct tcp_segment), 0);
-    if (!segment) {
-        LOGGER_WARN("rte_malloc tcp_segment error");
-        return -1;
-    }
-    segment->src_ip = entry->tcp.local_ip;
-    segment->dst_ip = entry->tcp.remote_ip;
-    segment->src_port = entry->tcp.local_port;
-    segment->dst_port = entry->tcp.remote_port;
-    segment->seq = entry->tcp.seq;
-    segment->ack = entry->tcp.ack;
-    segment->data_off = 0x50;
-    segment->flags = RTE_TCP_ACK_FLAG | RTE_TCP_PSH_FLAG;
-    segment->rx_win = entry->tcp.rx_win;
-    segment->tcp_urp = 0;
-    segment->data = (uint8_t*)rte_malloc("tcp_data", len, 0);
-    if (!segment->data) {
-        LOGGER_WARN("rte_malloc tcp_data error");
-        rte_free(segment);
-        return -1;
-    }
-    rte_memcpy(segment->data, buf, len);
-    segment->length = len;
     pthread_mutex_lock(&entry->mutex);
-    while (rte_ring_mp_enqueue(entry->tcp.send_ring, segment) != 0) {
+    if (entry->protocol != IPPROTO_TCP) {
+        pthread_mutex_unlock(&entry->mutex);
+        return -1;
+    }
+    if (entry->tcp.status != DPIP_TCP_ESTABLISHED) {
+        pthread_mutex_unlock(&entry->mutex);
+        return -1;
+    }
+    while (entry->tcp.send_info.size == entry->tcp.send_info.capacity && entry->tcp.status == DPIP_TCP_ESTABLISHED) {
         pthread_cond_wait(&entry->notfull, &entry->mutex);
     }
+    if (entry->tcp.status != DPIP_TCP_ESTABLISHED) {
+        pthread_mutex_unlock(&entry->mutex);
+        return -1;
+    }
+    len = (len > entry->tcp.send_info.capacity - entry->tcp.send_info.size) ? entry->tcp.send_info.capacity - entry->tcp.send_info.size : len;
+    for (size_t i = 0; i < len; ++i) {
+        entry->tcp.send_info.buf[entry->tcp.send_info.write_index] = ((const uint8_t*)buf)[i];
+        entry->tcp.send_info.write_index = (entry->tcp.send_info.write_index + 1) % entry->tcp.send_info.capacity;
+    }
+    entry->tcp.send_info.size += len;
     pthread_mutex_unlock(&entry->mutex);
     return len;
 }

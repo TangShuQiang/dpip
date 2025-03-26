@@ -82,13 +82,39 @@ struct socket_entry
             uint32_t remote_ip;             // 远程IP地址
             uint16_t remote_port;           // 远程端口
 
-            struct rte_ring* recv_ring;     // 接收缓冲区
-            struct rte_ring* send_ring;     // 发送缓冲区
+            struct
+            {
+                uint8_t* buf;               // 接收数据缓冲区
+                uint32_t capacity;          // 缓冲区容量
+                uint32_t size;              // 缓冲区大小
+                uint32_t write_index;       // 写索引
+                uint32_t read_index;        // 读索引
+                
+                struct rte_hash* recv_hash_table; // 乱序缓冲区
+            } recv_info;
+
+            struct
+            {
+                uint8_t* buf;               // 发送数据缓冲区
+                uint32_t capacity;          // 缓冲区容量
+                uint32_t size;              // 缓冲区大小
+                uint32_t write_index;       // 写索引
+                uint32_t read_index;        // 读索引
+
+            }send_info;
+
+            uint8_t nead_send_fin;          // 需要发送FIN标志
 
             uint8_t status;                 // TCP状态
 
-            uint32_t seq;                   // 序列号，对端期望的下一个序列号
-            uint32_t ack;                   // 确认号，期望收到的下一个序列号
+            uint32_t send_next;             // 下一个发送序列号
+            uint32_t send_una;              // 已发送但未确认区域的起始序列号
+
+            uint32_t recv_next;             // 期待接收的下一个序列号
+
+
+            uint32_t dup_ack_count;         // 重复确认计数
+
             uint16_t rx_win;                // 接收窗口
 
             struct socket_entry* syn_queue;      // 半连接队列
@@ -135,9 +161,6 @@ struct socket_key
 // socket表
 struct socket_table
 {
-    // struct socket_entry* udp_entry_head;
-    // struct socket_entry* tcp_entry_head;
-
     struct rte_hash* socket_hash_table;
     struct rte_hash* fd_hash_table;
 

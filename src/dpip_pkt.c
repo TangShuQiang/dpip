@@ -215,9 +215,18 @@ struct rte_mbuf* get_udp_pkt(struct rte_mempool* mbuf_pool
 struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool
                             , uint8_t* dst_mac
                             , uint8_t* src_mac
-                            , struct tcp_segment* segment) {
+                            , uint32_t dst_ip
+                            , uint32_t src_ip
+                            , uint16_t dst_port
+                            , uint16_t src_port
+                            , uint32_t seq
+                            , uint32_t ack
+                            , uint8_t flags
+                            , uint16_t rx_win
+                            , uint8_t* data
+                            , uint16_t length) {
     // 默认 TCP的可选字段为空
-    unsigned total_length = segment->length + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr);
+    unsigned total_length = length + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr);
 
     struct rte_mbuf* mbuf = rte_pktmbuf_alloc(mbuf_pool);
     if (!mbuf) {
@@ -231,120 +240,194 @@ struct rte_mbuf* get_tcp_pkt(struct rte_mempool* mbuf_pool
     encode_ether_hdr(pkt_ptr, dst_mac, src_mac, RTE_ETHER_TYPE_IPV4);
 
     pkt_ptr += sizeof(struct rte_ether_hdr);
-    encode_ipv4_hdr(pkt_ptr, segment->dst_ip, segment->src_ip, IPPROTO_TCP, total_length - sizeof(struct rte_ether_hdr));
+    encode_ipv4_hdr(pkt_ptr, dst_ip, src_ip, IPPROTO_TCP, total_length - sizeof(struct rte_ether_hdr));
 
-    encode_tcp_hdr(pkt_ptr
-                , segment->src_port
-                , segment->dst_port
-                , segment->seq
-                , segment->ack
-                , segment->flags
-                , segment->rx_win
-                , segment->data
-                , segment->length);
+    encode_tcp_hdr(pkt_ptr, src_port, dst_port, seq, ack, flags, rx_win, data, length);
     return mbuf;
 }
 
-void pkt_process_tcp_send_fin(struct socket_entry* tcp_sock_entry) {
-    struct tcp_segment* fin_segment = (struct tcp_segment*) rte_malloc("tcp_segment", sizeof(struct tcp_segment), 0);
-    if (!fin_segment) {
-        LOGGER_WARN("rte_malloc tcp_segment error");
-        return;
+void pkt_process_tcp_send_fin(struct dpip_nic* nic
+                            , struct socket_entry* tcp_sock_entry) {
+    struct arp_entry* arp_entry = get_mac_by_ip(&nic->arp_table, tcp_sock_entry->tcp.remote_ip);
+    if (!arp_entry) {
+        uint8_t broadcast_mac[RTE_ETHER_ADDR_LEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        struct rte_mbuf* arp_pkt = get_arp_pkt(nic->pkt_send_pool
+                                                , RTE_ARP_OP_REQUEST
+                                                , broadcast_mac
+                                                , nic->local_mac
+                                                , tcp_sock_entry->tcp.remote_ip
+                                                , tcp_sock_entry->tcp.local_ip);
+        rte_ring_mp_enqueue(nic->out_pkt_ring, arp_pkt);
+    } else {
+        struct rte_mbuf* tcp_fin_pkt = get_tcp_pkt(nic->pkt_send_pool
+                                                    , arp_entry->mac
+                                                    , nic->local_mac
+                                                    , tcp_sock_entry->tcp.remote_ip
+                                                    , tcp_sock_entry->tcp.local_ip
+                                                    , tcp_sock_entry->tcp.remote_port
+                                                    , tcp_sock_entry->tcp.local_port
+                                                    , tcp_sock_entry->tcp.send_next
+                                                    , tcp_sock_entry->tcp.recv_next
+                                                    , RTE_TCP_FIN_FLAG | RTE_TCP_ACK_FLAG
+                                                    , tcp_sock_entry->tcp.rx_win
+                                                    , NULL
+                                                    , 0);
+        rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_fin_pkt);
     }
-    fin_segment->src_ip = tcp_sock_entry->tcp.local_ip;
-    fin_segment->dst_ip = tcp_sock_entry->tcp.remote_ip;
-    fin_segment->src_port = tcp_sock_entry->tcp.local_port;
-    fin_segment->dst_port = tcp_sock_entry->tcp.remote_port;
-    fin_segment->seq = tcp_sock_entry->tcp.seq;
-    fin_segment->ack = tcp_sock_entry->tcp.ack;
-    fin_segment->data_off = 0x50;
-    fin_segment->flags = RTE_TCP_FIN_FLAG | RTE_TCP_ACK_FLAG;
-    fin_segment->rx_win = tcp_sock_entry->tcp.rx_win;
-    fin_segment->tcp_urp = 0;
-    fin_segment->data = NULL;
-    fin_segment->length = 0;
-
-    rte_ring_mp_enqueue(tcp_sock_entry->tcp.send_ring, fin_segment);
 }
 
-void pkt_process_tcp_send_ack(struct socket_entry* tcp_sock_entry) {           
-    struct tcp_segment* ack_segment = (struct tcp_segment*) rte_malloc("tcp_segment", sizeof(struct tcp_segment), 0);
-    if (!ack_segment) {
-        LOGGER_WARN("rte_malloc tcp_segment error");
-        return;
+void pkt_process_tcp_send_ack(struct dpip_nic* nic
+                            , struct socket_entry* tcp_sock_entry) {
+    struct arp_entry* arp_entry = get_mac_by_ip(&nic->arp_table, tcp_sock_entry->tcp.remote_ip);
+    if (!arp_entry) {
+        uint8_t broadcast_mac[RTE_ETHER_ADDR_LEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        struct rte_mbuf* arp_pkt = get_arp_pkt(nic->pkt_send_pool
+                                                , RTE_ARP_OP_REQUEST
+                                                , broadcast_mac
+                                                , nic->local_mac
+                                                , tcp_sock_entry->tcp.remote_ip
+                                                , tcp_sock_entry->tcp.local_ip);
+        rte_ring_mp_enqueue(nic->out_pkt_ring, arp_pkt);
+    } else {
+        struct rte_mbuf* tcp_ack_pkt = get_tcp_pkt(nic->pkt_send_pool
+                                                    , arp_entry->mac
+                                                    , nic->local_mac
+                                                    , tcp_sock_entry->tcp.remote_ip
+                                                    , tcp_sock_entry->tcp.local_ip
+                                                    , tcp_sock_entry->tcp.remote_port
+                                                    , tcp_sock_entry->tcp.local_port
+                                                    , tcp_sock_entry->tcp.send_next
+                                                    , tcp_sock_entry->tcp.recv_next
+                                                    , RTE_TCP_ACK_FLAG
+                                                    , tcp_sock_entry->tcp.rx_win
+                                                    , NULL
+                                                    , 0);
+        rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_ack_pkt);
     }
-    ack_segment->src_ip = tcp_sock_entry->tcp.local_ip;
-    ack_segment->dst_ip = tcp_sock_entry->tcp.remote_ip;
-    ack_segment->src_port = tcp_sock_entry->tcp.local_port;
-    ack_segment->dst_port = tcp_sock_entry->tcp.remote_port;
-    ack_segment->seq = tcp_sock_entry->tcp.seq;
-    ack_segment->ack = tcp_sock_entry->tcp.ack;
-    ack_segment->data_off = 0x50;
-    ack_segment->flags = RTE_TCP_ACK_FLAG;
-    ack_segment->rx_win = tcp_sock_entry->tcp.rx_win;
-    ack_segment->tcp_urp = 0;
-    ack_segment->data = NULL;
-    ack_segment->length = 0;
-
-    rte_ring_mp_enqueue(tcp_sock_entry->tcp.send_ring, ack_segment);
 }
 
-void pkt_process_tcp_on_established(struct socket_entry* tcp_sock_entry
+void pkt_process_tcp_on_established(struct dpip_nic* nic
+                                    , struct socket_entry* tcp_sock_entry
                                     , uint8_t* pkt_ptr) {
     struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
     struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
     struct rte_tcp_hdr* tcp_hdr = (struct rte_tcp_hdr*)(ip_hdr + 1);
 
+    if (tcp_hdr->tcp_flags & RTE_TCP_SYN_FLAG){
+        LOGGER_WARN("established status, but receive SYN flag");
+        return;
+    }
+
+    uint32_t seq = rte_be_to_cpu_32(tcp_hdr->sent_seq);
+    uint32_t ack = rte_be_to_cpu_32(tcp_hdr->recv_ack);
+
+    if (ack > tcp_sock_entry->tcp.send_una) {
+        tcp_sock_entry->tcp.send_una = ack;
+        tcp_sock_entry->tcp.dup_ack_count = 0;
+    } else if (ack == tcp_sock_entry->tcp.send_una) {
+        // 重复确认
+        if (tcp_sock_entry->tcp.send_una < tcp_sock_entry->tcp.send_next) {
+            ++tcp_sock_entry->tcp.dup_ack_count;
+        }
+    }
+
     // 接收数据包
     uint8_t payload_offset = (tcp_hdr->data_off >> 4) * 4;
     uint16_t data_length = rte_be_to_cpu_16(ip_hdr->total_length) - sizeof(struct rte_ipv4_hdr) - payload_offset;
 
-    pthread_mutex_lock(&tcp_sock_entry->mutex);
-    tcp_sock_entry->tcp.ack = rte_be_to_cpu_32(tcp_hdr->sent_seq) + data_length;
-    tcp_sock_entry->tcp.seq = rte_be_to_cpu_32(tcp_hdr->recv_ack);
-    if (tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG) {
-        ++tcp_sock_entry->tcp.ack;
+    // 数据包长度大于0, 则接收数据包
+    if (data_length > 0) {
+        // 顺序接收数据包
+        pthread_mutex_lock(&tcp_sock_entry->mutex);
+        if (seq == tcp_sock_entry->tcp.recv_next) {
+            tcp_sock_entry->tcp.recv_next += data_length;
+            uint32_t write_size = (data_length > tcp_sock_entry->tcp.recv_info.capacity - tcp_sock_entry->tcp.recv_info.size)
+                                    ? tcp_sock_entry->tcp.recv_info.capacity - tcp_sock_entry->tcp.recv_info.size 
+                                    : data_length;
+            for (uint32_t i = 0; i < write_size; ++i) {
+                tcp_sock_entry->tcp.recv_info.buf[tcp_sock_entry->tcp.recv_info.write_index] = ((uint8_t*)tcp_hdr)[payload_offset + i];
+                tcp_sock_entry->tcp.recv_info.write_index = (tcp_sock_entry->tcp.recv_info.write_index + 1) % tcp_sock_entry->tcp.recv_info.capacity;
+            }
+            tcp_sock_entry->tcp.recv_info.size += write_size;
+
+            pthread_cond_signal(&tcp_sock_entry->notempty);
+            // 检查乱序缓冲区中是否有可放入接收缓冲区的数据包
+            do {
+                struct tcp_segment* segment = NULL;
+                int ret = rte_hash_lookup_data(tcp_sock_entry->tcp.recv_info.recv_hash_table
+                                                , &tcp_sock_entry->tcp.recv_next
+                                                , (void**)&segment);
+                if (ret >= 0) {
+                    rte_hash_del_key(tcp_sock_entry->tcp.recv_info.recv_hash_table, &tcp_sock_entry->tcp.recv_next);
+                    tcp_sock_entry->tcp.recv_next += segment->length;
+                    
+                    write_size = (segment->length > tcp_sock_entry->tcp.recv_info.capacity - tcp_sock_entry->tcp.recv_info.size)
+                                    ? tcp_sock_entry->tcp.recv_info.capacity - tcp_sock_entry->tcp.recv_info.size 
+                                    : segment->length;
+                    for (uint32_t i = 0; i < write_size; ++i) {
+                        tcp_sock_entry->tcp.recv_info.buf[tcp_sock_entry->tcp.recv_info.write_index] = segment->data[i];
+                        tcp_sock_entry->tcp.recv_info.write_index = (tcp_sock_entry->tcp.recv_info.write_index + 1) % tcp_sock_entry->tcp.recv_info.capacity;
+                    }
+                    tcp_sock_entry->tcp.recv_info.size += write_size;
+                    tcp_sock_entry->tcp.recv_next += write_size;
+
+                    if (segment->flags & RTE_TCP_FIN_FLAG) {
+                        tcp_sock_entry->tcp.recv_next += 1;
+                        tcp_sock_entry->tcp.status = DPIP_TCP_CLOSE_WAIT;
+                    }
+
+                    rte_free(segment->data);
+                    rte_free(segment);
+                } else {
+                    break;
+                }
+            } while (1);
+        } else if (seq > tcp_sock_entry->tcp.recv_next) { // 将乱序接收的数据包存入乱序缓冲区
+            struct tcp_segment* segment = (struct tcp_segment*) rte_malloc("tcp_segment", sizeof(struct tcp_segment), 0);
+            if (!segment) {
+                LOGGER_WARN("rte_malloc tcp_segment error");
+                pthread_mutex_unlock(&tcp_sock_entry->mutex);
+                return;
+            }
+            segment->data = (uint8_t*) rte_malloc("tcp_data", data_length, 0);
+            if (!segment->data) {
+                LOGGER_WARN("rte_malloc tcp_data error");
+                rte_free(segment);
+                pthread_mutex_unlock(&tcp_sock_entry->mutex);
+                return;
+            }
+            rte_memcpy(segment->data, (uint8_t*)tcp_hdr + payload_offset, data_length);
+            segment->flags = tcp_hdr->tcp_flags;
+
+            rte_hash_add_key_data(tcp_sock_entry->tcp.recv_info.recv_hash_table, &seq, segment);
+        }// else if (seq < tcp_sock_entry->tcp.recv_next) 数据包已经收到过了
+        pthread_mutex_unlock(&tcp_sock_entry->mutex);
+    }
+
+    // 收到FIN数据包，且数据包已经接收完毕
+    if (tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG && seq == tcp_sock_entry->tcp.recv_next) {
+        // 对端关闭连接
+        tcp_sock_entry->tcp.recv_next += 1;
         tcp_sock_entry->tcp.status = DPIP_TCP_CLOSE_WAIT;
     }
-    pthread_mutex_unlock(&tcp_sock_entry->mutex);
 
-    // 数据包长度大于0，将数据包放入接收队列
-    if (data_length > 0) {
-        struct tcp_segment* segment = (struct tcp_segment*) rte_malloc("tcp_segment", sizeof(struct tcp_segment), 0);
-        if (!segment) {
-            LOGGER_WARN("rte_malloc tcp_segment error");
-            return;
-        }
-        segment->src_ip = ip_hdr->dst_addr;
-        segment->dst_ip = ip_hdr->src_addr;
-        segment->src_port = tcp_hdr->dst_port;
-        segment->dst_port = tcp_hdr->src_port;
-        segment->length = data_length;
-        segment->data = (uint8_t*) rte_malloc("tcp_data", data_length, 0);
-        if (!segment->data) {
-            LOGGER_WARN("rte_malloc tcp_data error");
-            rte_free(segment);
-            return;
-        }
-        rte_memcpy(segment->data, (uint8_t*)tcp_hdr + payload_offset, data_length);
-
-        rte_ring_mp_enqueue(tcp_sock_entry->tcp.recv_ring, segment);
-        pthread_cond_signal(&tcp_sock_entry->notempty);
+    if (data_length > 0 || tcp_sock_entry->tcp.dup_ack_count >= TCP_DUP_ACK_COUNT) {
+        pkt_process_tcp_send_ack(nic, tcp_sock_entry);
     }
 
-    pkt_process_tcp_send_ack(tcp_sock_entry);
     if (tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG) {
         pthread_cond_signal(&tcp_sock_entry->notempty);
     }
 }
 
-void pkt_process_tcp_on_listen(struct socket_entry* listen_sock_entry
+void pkt_process_tcp_on_listen(struct dpip_nic* nic
+                                , struct socket_entry* listen_sock_entry
                                 , uint8_t* pkt_ptr) {
     struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
     struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
     struct rte_tcp_hdr* tcp_hdr = (struct rte_tcp_hdr*)(ip_hdr + 1);
 
-    LOGGER_DEBUG("tcp flags: %d", tcp_hdr->tcp_flags);
+    // LOGGER_DEBUG("tcp flags: %d", tcp_hdr->tcp_flags);
 
     // 判断是否为SYN数据包: SYN=1, ACK=0, 第一次握手
     if (tcp_hdr->tcp_flags & RTE_TCP_SYN_FLAG) {
@@ -358,33 +441,39 @@ void pkt_process_tcp_on_listen(struct socket_entry* listen_sock_entry
             return;
         }
         // 第一次握手
-        if (syn_sock_entry->tcp.seq == TCP_MAX_SEQ) {
+        if (syn_sock_entry->tcp.send_next == TCP_MAX_SEQ) {
             time_t now = time(NULL);
             srand(now);
-            syn_sock_entry->tcp.seq = rand() % TCP_MAX_SEQ;
-            syn_sock_entry->tcp.ack = rte_be_to_cpu_32(tcp_hdr->sent_seq) + 1;
+            syn_sock_entry->tcp.send_next = rand() % TCP_MAX_SEQ;
+            syn_sock_entry->tcp.send_una = syn_sock_entry->tcp.send_next;
+            syn_sock_entry->tcp.recv_next = rte_be_to_cpu_32(tcp_hdr->sent_seq) + 1;
+
             syn_sock_entry->tcp.rx_win = rte_be_to_cpu_16(tcp_hdr->rx_win);
-        } // else 取出的是已经存在的半连接，不需要重新初始化
-
-        struct tcp_segment* segment = (struct tcp_segment*) rte_malloc("tcp_segment", sizeof(struct tcp_segment), 0);
-        if (!segment) {
-            LOGGER_WARN("rte_malloc tcp_segment error");
-            return;
+            syn_sock_entry->tcp.dup_ack_count = 0;
+        }  else {
+            // 重复的SYN数据包
+            ++syn_sock_entry->tcp.dup_ack_count;
         }
-        segment->src_ip = ip_hdr->dst_addr;
-        segment->dst_ip = ip_hdr->src_addr;
-        segment->src_port = tcp_hdr->dst_port;
-        segment->dst_port = tcp_hdr->src_port;
-        segment->seq = syn_sock_entry->tcp.seq;
-        segment->ack = syn_sock_entry->tcp.ack;
-        segment->data_off = 0x50;
-        segment->flags = (RTE_TCP_SYN_FLAG | RTE_TCP_ACK_FLAG);
-        segment->rx_win = syn_sock_entry->tcp.rx_win;
-        segment->tcp_urp = 0;
-        segment->data = NULL;
-        segment->length = 0;
 
-        rte_ring_mp_enqueue(syn_sock_entry->tcp.send_ring, segment);
+        if (syn_sock_entry->tcp.dup_ack_count % TCP_DUP_ACK_COUNT == 0) {
+            struct rte_mbuf* tcp_pkt = get_tcp_pkt(nic->pkt_send_pool
+                                                , eth_hdr->s_addr.addr_bytes
+                                                , eth_hdr->d_addr.addr_bytes
+                                                , ip_hdr->src_addr
+                                                , ip_hdr->dst_addr
+                                                , tcp_hdr->src_port
+                                                , tcp_hdr->dst_port
+                                                , syn_sock_entry->tcp.send_next
+                                                , syn_sock_entry->tcp.recv_next
+                                                , RTE_TCP_SYN_FLAG | RTE_TCP_ACK_FLAG
+                                                , syn_sock_entry->tcp.rx_win
+                                                , NULL
+                                                , 0);
+            rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_pkt);
+
+            syn_sock_entry->tcp.send_next += 1;
+            syn_sock_entry->tcp.dup_ack_count = 0;
+        }
         return;
     } 
     // 判断是否为ACK数据包
@@ -401,8 +490,7 @@ void pkt_process_tcp_on_listen(struct socket_entry* listen_sock_entry
         if (!(tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG) && accept_sock_entry->tcp.status == DPIP_TCP_SYN_RECEIVED) {
             pthread_mutex_lock(&listen_sock_entry->mutex);
             accept_sock_entry->tcp.status = DPIP_TCP_ESTABLISHED;
-            accept_sock_entry->tcp.seq = rte_be_to_cpu_32(tcp_hdr->recv_ack);
-            accept_sock_entry->tcp.ack = rte_be_to_cpu_32(tcp_hdr->sent_seq) + 1;
+            accept_sock_entry->tcp.send_una = rte_be_to_cpu_32(tcp_hdr->recv_ack);
             
             // 将半连接从队列中移除
             if (accept_sock_entry->prev) {
@@ -430,9 +518,7 @@ void pkt_process_tcp_on_listen(struct socket_entry* listen_sock_entry
             pthread_mutex_unlock(&listen_sock_entry->mutex);
         } else if (accept_sock_entry->tcp.status == DPIP_TCP_ESTABLISHED) {
             // 接收数据包
-            pkt_process_tcp_on_established(accept_sock_entry, pkt_ptr);
-        } else if (accept_sock_entry->tcp.status == DPIP_TCP_LAST_ACK) {
-            pkt_process_tcp_on_last_ack(accept_sock_entry, pkt_ptr);
+            pkt_process_tcp_on_established(nic, accept_sock_entry, pkt_ptr);
         }
     }
 }
@@ -443,44 +529,32 @@ void pkt_process_tcp_on_last_ack(struct socket_entry* tcp_sock_entry
     struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
     struct rte_tcp_hdr* tcp_hdr = (struct rte_tcp_hdr*)(ip_hdr + 1);
 
-    // 第二次挥手失败，收到重新发送的FIN包（第一次挥手）
-    if (tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG) {
-        pkt_process_tcp_send_ack(tcp_sock_entry);
-        return;
-    }
-    // 判断这个tcp_sock_entry是否在全连接队列中
-    struct socket_entry* entry = get_socket_entry_by_ip_port_protocol(IPPROTO_TCP
-                                                                    , ip_hdr->dst_addr
-                                                                    , tcp_hdr->dst_port
-                                                                    , ip_hdr->src_addr
-                                                                    , tcp_hdr->src_port);
-    rte_free(tcp_sock_entry->tcp.recv_ring);
-    rte_free(tcp_sock_entry->tcp.send_ring);
-    if (entry->tcp.status == DPIP_TCP_LISTEN) {
-        if (tcp_sock_entry->prev) {
-            tcp_sock_entry->prev->next = tcp_sock_entry->next;
-        } else {
-            entry->tcp.accept_queue = tcp_sock_entry->next;
-        }
-        if (tcp_sock_entry->next) {
-            tcp_sock_entry->next->prev = tcp_sock_entry->prev;
-        }
-        --entry->tcp.current_accept_queue_length;
-    } else {
+    // 全连接队列中的连接不调用close，不会进入LAST_ACK状态
+    // 只处理ACK数据包
+    uint32_t ack = rte_be_to_cpu_32(tcp_hdr->recv_ack);
+    if (tcp_hdr->tcp_flags & RTE_TCP_ACK_FLAG && ack == tcp_sock_entry->tcp.send_next) {
+        tcp_sock_entry->tcp.status = DPIP_TCP_CLOSED;
+
+        // 释放连接
+        rte_hash_free(tcp_sock_entry->tcp.recv_info.recv_hash_table);
+        rte_free(tcp_sock_entry->tcp.recv_info.buf);
+        rte_free(tcp_sock_entry->tcp.send_info.buf);
         del_socket_entry(tcp_sock_entry);
+        rte_free(tcp_sock_entry);
     }
-    rte_free(tcp_sock_entry);
 }
 
-void pkt_process_tcp_on_close_wait(struct socket_entry* tcp_sock_entry
+void pkt_process_tcp_on_close_wait(struct dpip_nic* nic
+                                , struct socket_entry* tcp_sock_entry
                                 , uint8_t* pkt_ptr) {
     struct rte_ether_hdr* eth_hdr = (struct rte_ether_hdr*)pkt_ptr;
     struct rte_ipv4_hdr* ip_hdr = (struct rte_ipv4_hdr*)(eth_hdr + 1);
     struct rte_tcp_hdr* tcp_hdr = (struct rte_tcp_hdr*)(ip_hdr + 1);
 
     // 第二次挥手失败，收到重新发送的FIN包（第一次挥手）
-    if (tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG) {
-        pkt_process_tcp_send_ack(tcp_sock_entry);
+    uint32_t seq = rte_be_to_cpu_32(tcp_hdr->sent_seq);
+    if (tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG && seq == tcp_sock_entry->tcp.recv_next) {
+        pkt_process_tcp_send_ack(nic, tcp_sock_entry);
     }
 }
 
@@ -599,7 +673,7 @@ void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_
             break;
         }
         case DPIP_TCP_LISTEN: {
-            pkt_process_tcp_on_listen(tcp_sock_entry, pkt_ptr);
+            pkt_process_tcp_on_listen(nic, tcp_sock_entry, pkt_ptr);
             break;
         }
         case DPIP_TCP_SYN_SENT: {
@@ -609,7 +683,7 @@ void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_
             break;
         }
         case DPIP_TCP_ESTABLISHED: {
-            pkt_process_tcp_on_established(tcp_sock_entry, pkt_ptr);
+            pkt_process_tcp_on_established(nic, tcp_sock_entry, pkt_ptr);
             break;
         }
         case DPIP_TCP_FIN_WAIT_1: {
@@ -619,7 +693,7 @@ void pkt_process_tcp(__attribute__((unused)) struct dpip_nic* nic, uint8_t* pkt_
             break;
         }
         case DPIP_TCP_CLOSE_WAIT: {
-            pkt_process_tcp_on_close_wait(tcp_sock_entry, pkt_ptr);
+            pkt_process_tcp_on_close_wait(nic, tcp_sock_entry, pkt_ptr);
             break;
         }
         case DPIP_TCP_CLOSING: {
@@ -756,63 +830,84 @@ void process_socket_entries(struct dpip_nic* nic) {
                 }
             }
         } else if (entry->protocol == IPPROTO_TCP) {
-            struct tcp_segment* segment = NULL;
             pthread_mutex_lock(&entry->mutex);
             if (!(entry->tcp.status == DPIP_TCP_LISTEN || entry->tcp.status == DPIP_TCP_CLOSED)) {
-                if (rte_ring_mc_dequeue(entry->tcp.send_ring, (void**)&segment) == 0) {
+                uint32_t send_size = (entry->tcp.send_info.size > DEFAULT_MSS ? DEFAULT_MSS : entry->tcp.send_info.size);
+                if (send_size > 0) {
+                    struct arp_entry* arp_entry = get_mac_by_ip(&nic->arp_table, entry->tcp.remote_ip);
+                    if (!arp_entry) {
+                        struct rte_mbuf* arp_buf = get_arp_pkt(nic->pkt_send_pool
+                                                            , RTE_ARP_OP_REQUEST
+                                                            , broadcast_mac
+                                                            , nic->local_mac
+                                                            , entry->tcp.remote_ip
+                                                            , entry->tcp.local_ip);
+                        rte_ring_mp_enqueue(nic->out_pkt_ring, arp_buf);
+                        pthread_mutex_unlock(&entry->mutex);
+                        continue;
+                    }
+
+                    uint8_t* data = (uint8_t*) rte_malloc("tcp_data", send_size, 0);
+                    if (!data) {
+                        LOGGER_WARN("rte_malloc tcp_data error");
+                        pthread_mutex_unlock(&entry->mutex);
+                        continue;
+                    }
+                    for (uint32_t i = 0; i < send_size; ++i) {
+                        data[i] = entry->tcp.send_info.buf[entry->tcp.send_info.read_index];
+                        entry->tcp.send_info.read_index = (entry->tcp.send_info.read_index + 1) % entry->tcp.send_info.capacity;
+                    }
+                    entry->tcp.send_info.size -= send_size;
                     pthread_cond_signal(&entry->notfull);
 
-                    struct arp_entry* arp_entry = get_mac_by_ip(&nic->arp_table, segment->dst_ip);
+                    struct rte_mbuf* tcp_buf = get_tcp_pkt(nic->pkt_send_pool
+                                                        , arp_entry->mac
+                                                        , nic->local_mac
+                                                        , entry->tcp.remote_ip
+                                                        , entry->tcp.local_ip
+                                                        , entry->tcp.remote_port
+                                                        , entry->tcp.local_port
+                                                        , entry->tcp.send_next
+                                                        , entry->tcp.recv_next
+                                                        , RTE_TCP_ACK_FLAG | RTE_TCP_PSH_FLAG
+                                                        , entry->tcp.rx_win
+                                                        , data
+                                                        , send_size);
+                    rte_free(data);
+                    rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_buf);
+                    entry->tcp.send_next += send_size;
+                }
+                if (entry->tcp.send_info.size == 0 && entry->tcp.nead_send_fin == 1) {
+                    struct arp_entry* arp_entry = get_mac_by_ip(&nic->arp_table, entry->tcp.remote_ip);
                     if (!arp_entry) {
                         struct rte_mbuf* arp_buf = get_arp_pkt(nic->pkt_send_pool
                                                             , RTE_ARP_OP_REQUEST
                                                             , broadcast_mac
                                                             , nic->local_mac
-                                                            , segment->dst_ip
-                                                            , segment->src_ip);
+                                                            , entry->tcp.remote_ip
+                                                            , entry->tcp.local_ip);
                         rte_ring_mp_enqueue(nic->out_pkt_ring, arp_buf);
-                        // 将数据包重新放入发送队列
-                        rte_ring_mp_enqueue(entry->tcp.send_ring, segment);
-                    } else {
-                        struct rte_mbuf* tcp_buf = get_tcp_pkt(nic->pkt_send_pool
+                        pthread_mutex_unlock(&entry->mutex);
+                        continue;
+                    }
+                    entry->tcp.nead_send_fin = 0;
+                    struct rte_mbuf* tcp_fin_pkt = get_tcp_pkt(nic->pkt_send_pool
                                                             , arp_entry->mac
                                                             , nic->local_mac
-                                                            , segment);
-                        rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_buf);
-                        rte_free(segment->data);
-                        rte_free(segment);
-                    }
+                                                            , entry->tcp.remote_ip
+                                                            , entry->tcp.local_ip
+                                                            , entry->tcp.remote_port
+                                                            , entry->tcp.local_port
+                                                            , entry->tcp.send_next
+                                                            , entry->tcp.recv_next
+                                                            , RTE_TCP_FIN_FLAG | RTE_TCP_ACK_FLAG
+                                                            , entry->tcp.rx_win
+                                                            , NULL
+                                                            , 0);
+                    ++entry->tcp.send_next;
+                    rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_fin_pkt);
                 }
-                pthread_mutex_unlock(&entry->mutex);
-                continue;
-            }
-            // 处理监听状态的socket实体
-            for (struct socket_entry* sys_sock_entry = entry->tcp.syn_queue; sys_sock_entry; sys_sock_entry = sys_sock_entry->next) {
-                if (rte_ring_mc_dequeue(sys_sock_entry->tcp.send_ring, (void**)&segment) == 0) {
-                    pthread_cond_signal(&sys_sock_entry->notfull);
-
-                    struct arp_entry* arp_entry = get_mac_by_ip(&nic->arp_table, segment->dst_ip);
-                    if (!arp_entry) {
-                        struct rte_mbuf* arp_buf = get_arp_pkt(nic->pkt_send_pool
-                                                            , RTE_ARP_OP_REQUEST
-                                                            , broadcast_mac
-                                                            , nic->local_mac
-                                                            , segment->dst_ip
-                                                            , segment->src_ip);
-                        rte_ring_mp_enqueue(nic->out_pkt_ring, arp_buf);
-                        // 将数据包重新放入发送队列
-                        rte_ring_mp_enqueue(sys_sock_entry->tcp.send_ring, segment);
-                    } else {
-                        struct rte_mbuf* tcp_buf = get_tcp_pkt(nic->pkt_send_pool
-                                                            , arp_entry->mac
-                                                            , nic->local_mac
-                                                            , segment);
-                        rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_buf);
-                        rte_free(segment->data);
-                        rte_free(segment);
-                    }
-                }
-            } // end for
+            }             
             pthread_mutex_unlock(&entry->mutex);
         } // end if
     } // end while

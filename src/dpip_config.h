@@ -41,5 +41,11 @@
 
 #define DPIP_TCP_SYN_QUEUE_MAX_LENGTH   2         // TCP半连接队列最大长度
 
+#define DPIP_TCP_RECV_BUF_SIZE          1024      // TCP接收缓冲区大小
+#define DPIP_TCP_SEND_BUF_SIZE          1024      // TCP发送缓冲区大小
+
+#define TCP_DUP_ACK_COUNT               3        // 重复ACK次数
+
+#define DEFAULT_MSS                   1460       // 默认最大报文段数据长度
 
 #endif
