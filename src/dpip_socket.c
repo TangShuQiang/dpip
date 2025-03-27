@@ -118,28 +118,18 @@ struct socket_entry* get_syn_by_ip_port(struct socket_entry* listen_sock_entry
         pthread_mutex_unlock(&listen_sock_entry->mutex);
         return NULL;
     }
-    new_syn_entry->tcp.recv_info.capacity = DPIP_TCP_RECV_BUF_SIZE;
-
-    static uint32_t count = 0;
-    char name[32];
-    sprintf(name, "recv_hash_table_%d", count++);
-    struct rte_hash_parameters recv_hash_table_params = {
-        .name = name,
-        .entries = MAX_FD_COUNT,
-        .key_len = sizeof(uint32_t),
-        .hash_func = rte_jhash,
-        .hash_func_init_val = 0,
-        .socket_id = rte_socket_id(),
-    };
-    new_syn_entry->tcp.recv_info.recv_hash_table = rte_hash_create(&recv_hash_table_params);
-    if (!new_syn_entry->tcp.recv_info.recv_hash_table) {
-        LOGGER_WARN("rte_hash_create %s error", name);
+    new_syn_entry->tcp.recv_info.buf_flag = (uint8_t*) rte_malloc("tcp_recv_buf_flag", DPIP_TCP_RECV_BUF_SIZE, 0);
+    if (!new_syn_entry->tcp.recv_info.buf_flag) {
+        LOGGER_WARN("rte_malloc tcp_recv_buf_flag error");
         rte_free(new_syn_entry->tcp.recv_info.buf);
         rte_free(new_syn_entry);
 
         pthread_mutex_unlock(&listen_sock_entry->mutex);
         return NULL;
     }
+    memset(new_syn_entry->tcp.recv_info.buf_flag, 0, DPIP_TCP_RECV_BUF_SIZE);
+
+    new_syn_entry->tcp.recv_info.capacity = DPIP_TCP_RECV_BUF_SIZE;
 
     new_syn_entry->tcp.send_info.buf = (uint8_t*) rte_malloc("tcp_send_buf", DPIP_TCP_SEND_BUF_SIZE, 0);
     if (!new_syn_entry->tcp.send_info.buf) {

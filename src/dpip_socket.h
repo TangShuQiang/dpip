@@ -36,25 +36,6 @@ struct udp_datagram
     uint8_t* data;      // 数据
 };
 
-// TCP 报文段
-struct tcp_segment
-{
-    uint32_t src_ip;    // 源IP地址
-    uint32_t dst_ip;    // 目的IP地址
-    uint16_t src_port;  // 源端口
-    uint16_t dst_port;  // 目的端口
-
-    uint32_t seq;       // 序列号
-    uint32_t ack;       // 确认号
-    uint8_t data_off;   // 数据偏移, 4bit，单位为4字节
-    uint8_t flags;      // TCP标志
-    uint16_t rx_win;    // 接收窗口
-    uint16_t tcp_urp;   // 紧急指针
-
-    uint16_t length;    // 数据的长度   (小端序)
-    uint8_t* data;      // 数据
-};
-
 // socket实体
 struct socket_entry
 {
@@ -85,21 +66,23 @@ struct socket_entry
             struct
             {
                 uint8_t* buf;               // 接收数据缓冲区
+                uint8_t* buf_flag;          // 接收数据缓冲区标志
                 uint32_t capacity;          // 缓冲区容量
                 uint32_t size;              // 缓冲区大小
                 uint32_t write_index;       // 写索引
                 uint32_t read_index;        // 读索引
-                
-                struct rte_hash* recv_hash_table; // 乱序缓冲区
             } recv_info;
 
             struct
             {
                 uint8_t* buf;               // 发送数据缓冲区
+                uint8_t* buf_flag;          // 发送数据缓冲区标志
                 uint32_t capacity;          // 缓冲区容量
                 uint32_t size;              // 缓冲区大小
                 uint32_t write_index;       // 写索引
                 uint32_t read_index;        // 读索引
+
+                uint32_t unacked;           // 已发送但未确认的数据长度
 
             }send_info;
 
