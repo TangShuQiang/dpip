@@ -98,7 +98,7 @@ struct socket_entry
 
             uint32_t dup_ack_count;         // 重复确认计数
 
-            uint16_t rx_win;                // 接收窗口
+            uint16_t rx_win;                // 对方的接收窗口大小
 
             struct socket_entry* syn_queue;      // 半连接队列
             struct socket_entry* accept_queue;   // 全连接队列

@@ -120,7 +120,7 @@ void encode_tcp_hdr(uint8_t* pkt_ptr
     tcp_hdr->recv_ack = rte_cpu_to_be_32(ack);
     tcp_hdr->data_off = 0x50;
     tcp_hdr->tcp_flags = flags;
-    tcp_hdr->rx_win = rx_win;
+    tcp_hdr->rx_win = rte_cpu_to_be_16(rx_win);
 
     rte_memcpy(tcp_hdr + 1, data, length);
 
@@ -269,7 +269,7 @@ void pkt_process_tcp_send_fin(struct dpip_nic* nic
                                                     , tcp_sock_entry->tcp.send_next
                                                     , tcp_sock_entry->tcp.recv_next
                                                     , RTE_TCP_FIN_FLAG | RTE_TCP_ACK_FLAG
-                                                    , tcp_sock_entry->tcp.rx_win
+                                                    , tcp_sock_entry->tcp.recv_info.capacity - tcp_sock_entry->tcp.recv_info.size
                                                     , NULL
                                                     , 0);
         rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_fin_pkt);
@@ -299,7 +299,7 @@ void pkt_process_tcp_send_ack(struct dpip_nic* nic
                                                     , tcp_sock_entry->tcp.send_next
                                                     , tcp_sock_entry->tcp.recv_next
                                                     , RTE_TCP_ACK_FLAG
-                                                    , tcp_sock_entry->tcp.rx_win
+                                                    , tcp_sock_entry->tcp.recv_info.capacity - tcp_sock_entry->tcp.recv_info.size
                                                     , NULL
                                                     , 0);
         rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_ack_pkt);
@@ -422,6 +422,7 @@ void pkt_process_tcp_on_established(struct dpip_nic* nic
 
     if (tcp_sock_entry->tcp.dup_ack_count >= TCP_DUP_ACK_COUNT) {
         tcp_sock_entry->tcp.send_info.unacked = 0;
+        tcp_sock_entry->tcp.dup_ack_count = 0;
     }
 
     if (tcp_hdr->tcp_flags & RTE_TCP_FIN_FLAG) {
@@ -461,7 +462,11 @@ void pkt_process_tcp_on_listen(struct dpip_nic* nic
             syn_sock_entry->tcp.dup_ack_count = 0;
         }  else {
             // 重复的SYN数据包
-            ++syn_sock_entry->tcp.dup_ack_count;
+            if (rte_be_to_cpu_32(tcp_hdr->sent_seq) + 1 == syn_sock_entry->tcp.recv_next) {
+                syn_sock_entry->tcp.send_next -= 1; // 需要重发第二次握手，序列号减1
+            } else {
+                return;
+            }
         }
 
         if (syn_sock_entry->tcp.dup_ack_count % TCP_DUP_ACK_COUNT == 0) {
@@ -475,13 +480,12 @@ void pkt_process_tcp_on_listen(struct dpip_nic* nic
                                                 , syn_sock_entry->tcp.send_next
                                                 , syn_sock_entry->tcp.recv_next
                                                 , RTE_TCP_SYN_FLAG | RTE_TCP_ACK_FLAG
-                                                , syn_sock_entry->tcp.rx_win
+                                                , syn_sock_entry->tcp.recv_info.capacity - syn_sock_entry->tcp.recv_info.size
                                                 , NULL
                                                 , 0);
             rte_ring_mp_enqueue(nic->out_pkt_ring, tcp_pkt);
 
             syn_sock_entry->tcp.send_next += 1;
-            syn_sock_entry->tcp.dup_ack_count = 0;
         }
         return;
     } 
@@ -841,9 +845,10 @@ void process_socket_entries(struct dpip_nic* nic) {
         } else if (entry->protocol == IPPROTO_TCP) {
             pthread_mutex_lock(&entry->mutex);
             if (!(entry->tcp.status == DPIP_TCP_LISTEN || entry->tcp.status == DPIP_TCP_CLOSED)) {
-                if (entry->tcp.send_info.unacked < entry->tcp.send_info.size) {
-                    uint32_t send_size = (entry->tcp.send_info.size - entry->tcp.send_info.unacked > DEFAULT_MSS)
-                                        ? DEFAULT_MSS : entry->tcp.send_info.size - entry->tcp.send_info.unacked;
+                if (entry->tcp.send_info.unacked < entry->tcp.send_info.size && entry->tcp.send_info.unacked < entry->tcp.rx_win) {
+                    uint32_t send_size = (entry->tcp.send_info.size > entry->tcp.rx_win ? entry->tcp.rx_win : entry->tcp.send_info.size) 
+                                            - entry->tcp.send_info.unacked;
+                    send_size = (send_size > DEFAULT_MSS) ? DEFAULT_MSS : send_size;
                     struct arp_entry* arp_entry = get_mac_by_ip(&nic->arp_table, entry->tcp.remote_ip);
                     if (!arp_entry) {
                         struct rte_mbuf* arp_buf = get_arp_pkt(nic->pkt_send_pool
@@ -882,7 +887,7 @@ void process_socket_entries(struct dpip_nic* nic) {
                                                         , entry->tcp.send_next
                                                         , entry->tcp.recv_next
                                                         , RTE_TCP_ACK_FLAG | RTE_TCP_PSH_FLAG
-                                                        , entry->tcp.rx_win
+                                                        , entry->tcp.recv_info.capacity - entry->tcp.recv_info.size
                                                         , data
                                                         , send_size);
                     rte_free(data);
@@ -913,7 +918,7 @@ void process_socket_entries(struct dpip_nic* nic) {
                                                             , entry->tcp.send_next
                                                             , entry->tcp.recv_next
                                                             , RTE_TCP_FIN_FLAG | RTE_TCP_ACK_FLAG
-                                                            , entry->tcp.rx_win
+                                                            , entry->tcp.recv_info.capacity - entry->tcp.recv_info.size
                                                             , NULL
                                                             , 0);
                     ++entry->tcp.send_next;
