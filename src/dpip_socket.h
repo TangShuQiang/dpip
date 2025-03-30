@@ -82,7 +82,7 @@ struct socket_entry
                 uint32_t write_index;       // 写索引
                 uint32_t read_index;        // 读索引
 
-                uint32_t unacked;           // 已发送但未确认的数据长度
+                uint32_t unackedlen;           // 已发送但未确认的数据长度
 
             }send_info;
 

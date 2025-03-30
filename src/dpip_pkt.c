@@ -324,7 +324,7 @@ void pkt_process_tcp_on_established(struct dpip_nic* nic
     pthread_mutex_lock(&tcp_sock_entry->mutex);
     if (ack > tcp_sock_entry->tcp.send_una) {
         // 收到新的ack，更新发送窗口
-        tcp_sock_entry->tcp.send_info.unacked -= ack - tcp_sock_entry->tcp.send_una;
+        tcp_sock_entry->tcp.send_info.unackedlen -= ack - tcp_sock_entry->tcp.send_una;
         tcp_sock_entry->tcp.send_info.read_index = (tcp_sock_entry->tcp.send_info.read_index + ack - tcp_sock_entry->tcp.send_una) % tcp_sock_entry->tcp.send_info.capacity;
         tcp_sock_entry->tcp.send_info.size -= ack - tcp_sock_entry->tcp.send_una;
 
@@ -421,7 +421,9 @@ void pkt_process_tcp_on_established(struct dpip_nic* nic
     }
 
     if (tcp_sock_entry->tcp.dup_ack_count >= TCP_DUP_ACK_COUNT) {
-        tcp_sock_entry->tcp.send_info.unacked = 0;
+        tcp_sock_entry->tcp.send_next = tcp_sock_entry->tcp.send_una;       // 快速重传,发送序列号重置
+
+        tcp_sock_entry->tcp.send_info.unackedlen = 0;
         tcp_sock_entry->tcp.dup_ack_count = 0;
     }
 
@@ -845,9 +847,9 @@ void process_socket_entries(struct dpip_nic* nic) {
         } else if (entry->protocol == IPPROTO_TCP) {
             pthread_mutex_lock(&entry->mutex);
             if (!(entry->tcp.status == DPIP_TCP_LISTEN || entry->tcp.status == DPIP_TCP_CLOSED)) {
-                if (entry->tcp.send_info.unacked < entry->tcp.send_info.size && entry->tcp.send_info.unacked < entry->tcp.rx_win) {
+                if (entry->tcp.send_info.unackedlen < entry->tcp.send_info.size && entry->tcp.send_info.unackedlen < entry->tcp.rx_win) {
                     uint32_t send_size = (entry->tcp.send_info.size > entry->tcp.rx_win ? entry->tcp.rx_win : entry->tcp.send_info.size) 
-                                            - entry->tcp.send_info.unacked;
+                                            - entry->tcp.send_info.unackedlen;
                     send_size = (send_size > DEFAULT_MSS) ? DEFAULT_MSS : send_size;
                     struct arp_entry* arp_entry = get_mac_by_ip(&nic->arp_table, entry->tcp.remote_ip);
                     if (!arp_entry) {
@@ -868,14 +870,14 @@ void process_socket_entries(struct dpip_nic* nic) {
                         pthread_mutex_unlock(&entry->mutex);
                         continue;
                     }
-                    if (entry->tcp.send_info.read_index + entry->tcp.send_info.unacked + send_size > entry->tcp.send_info.capacity) {
-                        uint32_t first_size = entry->tcp.send_info.capacity - entry->tcp.send_info.read_index - entry->tcp.send_info.unacked;
-                        rte_memcpy(data, entry->tcp.send_info.buf + entry->tcp.send_info.read_index + entry->tcp.send_info.unacked, first_size);
+                    if (entry->tcp.send_info.read_index + entry->tcp.send_info.unackedlen + send_size > entry->tcp.send_info.capacity) {
+                        uint32_t first_size = entry->tcp.send_info.capacity - entry->tcp.send_info.read_index - entry->tcp.send_info.unackedlen;
+                        rte_memcpy(data, entry->tcp.send_info.buf + entry->tcp.send_info.read_index + entry->tcp.send_info.unackedlen, first_size);
                         rte_memcpy(data + first_size, entry->tcp.send_info.buf, send_size - first_size);
                     } else {
-                        rte_memcpy(data, entry->tcp.send_info.buf + entry->tcp.send_info.read_index + entry->tcp.send_info.unacked, send_size);
+                        rte_memcpy(data, entry->tcp.send_info.buf + entry->tcp.send_info.read_index + entry->tcp.send_info.unackedlen, send_size);
                     }
-                    entry->tcp.send_info.unacked += send_size;
+                    entry->tcp.send_info.unackedlen += send_size;
 
                     struct rte_mbuf* tcp_buf = get_tcp_pkt(nic->pkt_send_pool
                                                         , arp_entry->mac
